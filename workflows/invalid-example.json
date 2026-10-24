@@ -1,0 +1,20 @@
+{
+  "id": "invalid-example",
+  "name": "故意寫錯的 workflow：展示 compiler 會擋下哪些錯",
+  "nodes": [
+    { "id": "start", "type": "start", "ports": { "outputs": { "request": { "type": "string" }, "count": { "type": "integer" } } } },
+    { "id": "planner", "type": "planning_agent", "config": { "allowed_tools": ["Bash"], "model": "claude-opus-4" } },
+    { "id": "coder", "type": "coding_agent" },
+    { "id": "ghost", "type": "web_scraper_agent" },
+    { "id": "gate", "type": "condition", "config": { "rule": { "op": "approx", "value": 1 } } },
+    { "id": "loop", "type": "loop", "config": { "max_iterations": 0 }, "body": { "nodes": [], "edges": [] } }
+  ],
+  "edges": [
+    { "kind": "control", "from": { "node": "start", "port": "success" }, "to": { "node": "planner", "port": "execute" } },
+    { "kind": "data", "from": { "node": "start", "port": "count" }, "to": { "node": "planner", "port": "request" } },
+    { "kind": "data", "from": { "node": "planner", "port": "success" }, "to": { "node": "coder", "port": "execute" } },
+    { "kind": "data", "from": { "node": "planner", "port": "plan" }, "to": { "node": "coder", "port": "nonexistent" } },
+    { "kind": "control", "from": { "node": "planner", "port": "success" }, "to": { "node": "coder", "port": "execute" } },
+    { "kind": "control", "from": { "node": "coder", "port": "success" }, "to": { "node": "planner", "port": "execute" } }
+  ]
+}

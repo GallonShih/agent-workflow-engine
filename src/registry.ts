@@ -1,11 +1,8 @@
-import fs from 'node:fs';
-import path from 'node:path';
-import YAML from 'yaml';
 import type { DataPortDef, JSONSchema, NodeDefinition } from './types.js';
 import { assertValidSchema } from './schema.js';
 
 /**
- * Node Registry：從目錄載入 YAML/JSON 節點定義（Agent 與 builtin 都一樣格式）。
+ * Node Registry（不依賴 fs，瀏覽器也能用；從目錄載入見 registry-fs.ts）：YAML/JSON 節點定義（Agent 與 builtin 都一樣格式）。
  * - `types.yaml` 可以定義具名型別（Task、Issue...），port schema 用 `$type: Task` 引用，
  *   載入時展開成完整 JSON Schema 並加上 title（UI socket 名稱）。
  * - 簡寫：port 直接寫 JSON Schema（`{type: string}`），或寫成 `{schema: ..., required: false}`。
@@ -14,23 +11,9 @@ export class NodeRegistry {
   private defs = new Map<string, NodeDefinition>();
   types: Record<string, JSONSchema> = {};
 
-  static fromDirs(...dirs: string[]): NodeRegistry {
-    const reg = new NodeRegistry();
-    for (const dir of dirs) reg.loadDir(dir);
-    return reg;
-  }
-
-  loadDir(dir: string): void {
-    const files = fs.readdirSync(dir).filter((f) => /\.(ya?ml|json)$/.test(f)).sort();
-    const typesFile = files.find((f) => /^types\.(ya?ml|json)$/.test(f));
-    if (typesFile) {
-      const raw = parseFile(path.join(dir, typesFile)) as Record<string, JSONSchema>;
-      for (const [name, schema] of Object.entries(raw)) this.types[name] = { title: name, ...schema };
-    }
-    for (const f of files) {
-      if (f === typesFile) continue;
-      this.register(parseFile(path.join(dir, f)) as Record<string, unknown>, path.join(dir, f));
-    }
+  /** 註冊具名型別（types.yaml） */
+  addTypes(raw: Record<string, JSONSchema>): void {
+    for (const [name, schema] of Object.entries(raw)) this.types[name] = { title: name, ...schema };
   }
 
   register(raw: Record<string, unknown>, source = '<inline>'): NodeDefinition {
@@ -89,7 +72,3 @@ export class NodeRegistry {
   }
 }
 
-function parseFile(file: string): unknown {
-  const text = fs.readFileSync(file, 'utf8');
-  return file.endsWith('.json') ? JSON.parse(text) : YAML.parse(text);
-}

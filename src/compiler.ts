@@ -38,9 +38,47 @@ export interface CompileResult {
 const POLICY_FIELDS = ['runtime', 'allowed_tools', 'mcp', 'skills', 'system_prompt', 'model'];
 const RULE_OPS = ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'truthy', 'falsy', 'contains', 'is_empty', 'not_empty'];
 
-interface LoopPorts {
+export interface LoopPorts {
   inputs: Record<string, DataPortDef>;
   outputs: Record<string, DataPortDef>;
+}
+
+/**
+ * 解析一個節點實際的 data ports（含 start/end/template/loop 的 dynamic ports 與 loop_in/loop_out 的繼承 ports）。
+ * Compiler 與前端 Rete editor 共用，確保兩邊看到的 port/型別一致。
+ */
+export function resolveNodePorts(
+  n: WorkflowNode,
+  def: NodeDefinition,
+  registry: NodeRegistry,
+  loop?: LoopPorts,
+): LoopPorts {
+  let inputs = def.inputs;
+  let outputs = def.outputs;
+  const dynIn = n.ports?.inputs ? registry.normalizePorts(n.ports.inputs, `${n.id}.ports.inputs`) : {};
+  const dynOut = n.ports?.outputs ? registry.normalizePorts(n.ports.outputs, `${n.id}.ports.outputs`) : {};
+  switch (n.type) {
+    case 'start':
+      outputs = dynOut;
+      break;
+    case 'end':
+      inputs = Object.fromEntries(Object.entries(dynIn).map(([k, p]) => [k, { ...p, required: p.required ?? false }]));
+      break;
+    case 'template':
+      inputs = dynIn;
+      break;
+    case 'loop':
+      inputs = dynIn;
+      outputs = { ...dynOut, iterations: { schema: { type: 'integer' } } };
+      break;
+    case 'loop_in':
+      outputs = { ...(loop?.inputs ?? {}), iteration: { schema: { type: 'integer' } } };
+      break;
+    case 'loop_out':
+      inputs = loop?.outputs ?? {};
+      break;
+  }
+  return { inputs, outputs };
 }
 
 /**
@@ -91,29 +129,7 @@ function compileGraph(
     let inputs = def.inputs;
     let outputs = def.outputs;
     try {
-      const dynIn = n.ports?.inputs ? registry.normalizePorts(n.ports.inputs, `${n.id}.ports.inputs`) : {};
-      const dynOut = n.ports?.outputs ? registry.normalizePorts(n.ports.outputs, `${n.id}.ports.outputs`) : {};
-      switch (n.type) {
-        case 'start':
-          outputs = dynOut;
-          break;
-        case 'end':
-          inputs = Object.fromEntries(Object.entries(dynIn).map(([k, p]) => [k, { ...p, required: p.required ?? false }]));
-          break;
-        case 'template':
-          inputs = dynIn;
-          break;
-        case 'loop':
-          inputs = dynIn;
-          outputs = { ...dynOut, iterations: { schema: { type: 'integer' } } };
-          break;
-        case 'loop_in':
-          outputs = { ...(loop?.inputs ?? {}), iteration: { schema: { type: 'integer' } } };
-          break;
-        case 'loop_out':
-          inputs = loop?.outputs ?? {};
-          break;
-      }
+      ({ inputs, outputs } = resolveNodePorts(n, def, registry, loop));
     } catch (e) {
       err('INVALID_PORT_SCHEMA', (e as Error).message, { node: n.id });
     }

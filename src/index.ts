@@ -1,7 +1,9 @@
 export * from './types.js';
 export * from './schema.js';
 export * from './registry.js';
+export * from './registry-fs.js';
 export * from './compiler.js';
+export * from './planner.js';
 export * from './sockets.js';
 export { runWorkflow, GraphRun, RunContext, scopeKey } from './engine.js';
 export * from './runtime/types.js';

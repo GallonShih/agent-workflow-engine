@@ -1,4 +1,3 @@
-import { EventEmitter } from 'node:events';
 import { ClassicPreset, NodeEditor, type GetSchemes } from 'rete';
 import { DataflowEngine, ControlFlowEngine } from 'rete-engine';
 import type { CompiledGraph, CompiledNode } from './compiler.js';
@@ -60,21 +59,19 @@ export interface RunOptions {
   onEvent?: (e: RunEvent) => void;
 }
 
-export class RunContext extends EventEmitter {
+export class RunContext {
   runId: string;
   records = new Map<string, NodeRunRecord>();
   history: NodeRunRecord[] = [];
   events: RunEvent[] = [];
   seq = 0;
   constructor(public opts: RunOptions) {
-    super();
     this.runId = opts.runId ?? `run_${Date.now().toString(36)}`;
   }
   emitEvent(type: RunEvent['type'], extra: Omit<Partial<RunEvent>, 'seq' | 'ts' | 'run_id' | 'type'> = {}) {
     const e: RunEvent = { seq: ++this.seq, ts: Date.now(), run_id: this.runId, type, ...extra };
     this.events.push(e);
     this.opts.onEvent?.(e);
-    this.emit('event', e);
   }
 }
 
@@ -359,10 +356,10 @@ export class GraphRun {
     let lastErr = '';
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const ac = new AbortController();
-      let timer: NodeJS.Timeout | undefined;
+      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         const res = await Promise.race([
-          runtime.run({ def, nodeId: cn.id, inputs, prompt, outputSchema, scope: this.scope, iteration, attempt, signal: ac.signal, workingDirectory: this.ctx.opts.workingDirectory ?? process.cwd() }),
+          runtime.run({ def, nodeId: cn.id, inputs, prompt, outputSchema, scope: this.scope, iteration, attempt, signal: ac.signal, workingDirectory: this.ctx.opts.workingDirectory ?? (globalThis as { process?: { cwd(): string } }).process?.cwd() ?? '/' }),
           new Promise<never>((_, rej) => (timer = setTimeout(() => { ac.abort(); rej(new Error(`timeout after ${timeoutMs}ms`)); }, timeoutMs))),
         ]);
         events.push(...res.events);

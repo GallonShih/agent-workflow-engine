@@ -99,7 +99,9 @@ export interface WorkflowNode {
   /** builtin 節點參數（condition rules、template、join policy、loop config...） */
   config?: Record<string, unknown>;
   /** dynamic ports（目前只給 loop / start / end 使用） */
-  ports?: { inputs?: Record<string, DataPortDef>; outputs?: Record<string, DataPortDef> };
+  ports?: { inputs?: Record<string, DataPortDef | JSONSchema>; outputs?: Record<string, DataPortDef | JSONSchema> };
+  /** 編輯器座標（Rete editor 存檔用，engine 不看） */
+  ui?: { x: number; y: number };
   /** loop composite 的內部子圖 */
   body?: WorkflowGraph;
 }

@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { NodeRegistry, compileWorkflow, runWorkflow, makeRuntimeSelector, scopeKey, type RunEvent } from '../src/index.js';
+import { loadRegistry } from '../src/registry-fs.js';
+import { compileWorkflow, runWorkflow, makeRuntimeSelector, scopeKey, type RunEvent } from '../src/index.js';
 import { demoRuntime } from '../src/demo/scenario.js';
 
 const args = process.argv.slice(2);
@@ -10,7 +11,7 @@ const opt = (name: string, d: string) => { const i = args.indexOf(`--${name}`); 
 const root = path.resolve(import.meta.dirname, '..');
 const wfFile = opt('workflow', path.join(root, 'workflows/fix-until-tests-pass.json'));
 const scenario = opt('scenario', 'pass'); // pass | fail
-const registry = NodeRegistry.fromDirs(path.join(root, 'registry/builtin'), path.join(root, 'registry/agents'));
+const registry = loadRegistry(path.join(root, 'registry/builtin'), path.join(root, 'registry/agents'));
 const wf = JSON.parse(fs.readFileSync(wfFile, 'utf8'));
 
 const compiled = compileWorkflow(wf, registry);

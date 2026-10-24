@@ -1,11 +1,12 @@
 import path from 'node:path';
-import { NodeRegistry } from '../src/registry.js';
+import { loadRegistry } from '../src/registry-fs.js';
+import type { NodeRegistry } from '../src/registry.js';
 import type { Edge, WorkflowGraph, WorkflowNode } from '../src/types.js';
 
 export const root = path.resolve(import.meta.dirname, '..');
 
 export function registry(): NodeRegistry {
-  const reg = NodeRegistry.fromDirs(path.join(root, 'registry/builtin'), path.join(root, 'registry/agents'));
+  const reg = loadRegistry(path.join(root, 'registry/builtin'), path.join(root, 'registry/agents'));
   // 測試用小型節點
   reg.register({ name: 'producer', runtime: 'mock', outputs: { text: { type: 'string' }, count: { type: 'integer' }, tags: { type: 'array', items: { type: 'string' } } } });
   reg.register({ name: 'needs_text', runtime: 'mock', inputs: { text: { type: 'string' } }, outputs: { echo: { type: 'string' } } });
