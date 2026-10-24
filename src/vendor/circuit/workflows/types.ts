@@ -1,3 +1,4 @@
+// Derived from smogili1/circuit backend/src/workflows/types.ts (Apache-2.0, see ../LICENSE, ../UPSTREAM_COMMIT); reduced to the types used here.
 // Shim：只保留 Circuit backend/src/workflows/types.ts 中 agents/claude.ts、base.ts 會用到的型別
 // （欄位名稱與 upstream 相同，方便之後同步 upstream）。
 export interface ExecutionContext {

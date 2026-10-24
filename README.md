@@ -68,7 +68,7 @@ v1 只有 **6 個概念**：**節點**、**有型別的 port**、**資料連線*
 | loop | 動態；`done`、`iterations` | 重複執行 body 直到 `until` |
 | transform | `input` → `result` | JSONata 表達式（不執行任意程式碼） |
 | template | 動態輸入 → `text` | `{{inputs.x}}` 組字串 |
-| http_request | `url`,`body`,`headers`,`query` → `status`,`ok`,`body`,`headers` | 只允許 http/https；`HTTP_ALLOW_HOSTS` 白名單 |
+| http_request | `url`,`body`,`headers`,`query` → `status`,`ok`,`body`,`headers` | 只允許 http/https；預設擋私有 / loopback 位址，redirect 逐跳檢查；`HTTP_ALLOW_HOSTS` 白名單 |
 | json_parse | `text` → `value` | 可從 ``` 區塊擷取 |
 | log | `message` → `value` | 寫入監控 log |
 | planning / coding / testing / risk_review / report_agent | 見 `registry/agents/*.yaml` | mock 或 Claude；runtime / model / prompt / allowed_tools 等由 registry 決定，workflow 不可覆寫 |
@@ -150,29 +150,7 @@ Cursor（專案的 `.cursor/mcp.json` 或 `~/.cursor/mcp.json`）：
 
 截圖（headless Chrome 實測，`screenshots/`）：`11-v1-editor.png`（v1 編輯器 + agent 屬性面板 + v1 JSON）、`12-v1-monitor.png`（v1 run 完成、loop 3 輪）。`01`–`10` 是進階 / 舊格式時期的截圖（屬性面板、驗證錯誤、監控、replay、resume、巢狀 loop、subflow）。
 
-## 執行與安全設定
-
-- **Runtime 預設是 mock。** 只有 `--runtime claude`（或 `AGENT_RUNTIME=claude`）**而且**有 `ANTHROPIC_API_KEY` 時才會走 Circuit 的 Claude adapter；否則一律 mock（`GET /api/health` 會回報原因）。
-- `HTTP_ALLOW_HOSTS=api.example.com,localhost`：HTTP Request 節點的主機白名單。
-- 檔案節點（進階）只能讀寫 `.workspace/`（沙盒）。
-- 每次執行都寫進 `.runs/`（`<run_id>.meta.json`、`.workflow.json`、`.events.jsonl`、`.records.json`）；`.runs/`、`.workspace/` 已列在 `.gitignore`。
-
-## 後端 API（`src/server/app.ts`）
-
-| Method | Path | 說明 |
-|---|---|---|
-| GET | `/api/health` | 狀態 + 目前 runtime（mode / reason）+ registry 節點數 |
-| GET | `/api/registry` | 節點定義；預設只回 v1 節點，`?advanced=1` 回全部 |
-| GET | `/api/workflows`、`/api/workflows/:id` | `workflows/*.json` |
-| PUT | `/api/workflows/:id[?advanced=1]` | 存回 `workflows/<id>.json`；有驗證錯誤回 `422`（避免把被 subflow 引用的 workflow 存成跑不動的版本） |
-| POST | `/api/validate` | `{workflow, advanced?}` → compiler 的 errors / warnings（每個都附 `fix` 修正建議） |
-| POST | `/api/runs` | `{workflow \| workflow_id, inputs, scenario, pass_on, mock_delay_ms}` → `202 {run_id}`；編譯失敗回 `422` |
-| GET | `/api/runs`、`/api/runs/:id` | 執行紀錄列表；單一 run 的 meta + workflow + events + records |
-| GET | `/api/runs/:id/events` | SSE（`event: run`、`id: seq`）；支援 `?after=` / `Last-Event-ID`，先補發歷史再即時推送，結束時送 `event: end` |
-| POST | `/api/runs/:id/cancel` | 取消執行中的 run（AbortSignal 傳到 agent / HTTP / delay） |
-| POST | `/api/runs/:id/resume`（進階） | 以同一份 workflow 重跑，**已成功的 agent 節點沿用上次輸出**（依 scope/node_id 對應），其餘重新執行 |
-
-## Web UI
+### UI 細節（屬性面板、監控、巢狀 drill-down）
 
 - **節點屬性面板（右側「屬性」）**：Label、依 `config_schema` 自動產生的設定表單；Agent 節點的 runtime / model / prompt / allowed tools / MCP / skills 以 🔒 唯讀顯示，只有 `max_turns`、`timeout_seconds`、`retry` 可改；動態 ports（start / end / set / template / loop / foreach / subflow）可新增、刪除、改型別；`output_overrides` 可收窄 any 型別輸出；解析後的 ports 與型別表。修改即時反映到畫布與 Workflow JSON，並 debounce 重新驗證，錯誤以紅色 badge 標在節點上。
 - **執行監控（右側「執行監控」）**：Backend 模式透過 SSE 即時上色（running 會脈動）；點節點看 Status / Input / Output / Agent Events / Duration / Tokens / Attempts / Retries；Loop、Foreach 節點有 iteration 選擇器。
@@ -190,7 +168,34 @@ Cursor（專案的 `.cursor/mcp.json` 或 `~/.cursor/mcp.json`）：
 `01-editor-properties-agent.png`（屬性面板）、`02-editor-validation-errors.png`（INVALID_CONFIG badge）、`03-monitor-running.png`、`04-monitor-completed-loop-body.png`（loop body + iteration 選擇器）、`05-monitor-completed-run.png`（完成的 run）、`06-history-replay.png`、`07-resume.png`、`08-nested-loop-drilldown.png`（兩層 loop drill-down + breadcrumb + 邊界節點）、`09-nested-loop-monitor-iterations.png`（外層 #0 / 內層 #1 分開選，tester 該輪的資料）、`10-subworkflow-readonly.png`（subflow 唯讀 drill-in + run 資料）。
 
 巢狀 demo：工具列「開啟 workflows/…」選 `nested-review`（subflow `plan-subflow` 拆解任務 → 外層 review 2 輪 × 內層 coding⇄testing 迴圈）。
+
+## 執行與安全設定
+
+- **Runtime 預設是 mock。** 只有 `--runtime claude`（或 `AGENT_RUNTIME=claude`）**而且**有 `ANTHROPIC_API_KEY` 時才會走 Circuit 的 Claude adapter；否則一律 mock（`GET /api/health` 會回報原因）。
+- **HTTP Request 節點（SSRF 防護）**：只允許 http/https。沒設白名單時，預設**擋掉 loopback / 私有 / link-local（含雲端 metadata `169.254.169.254`）/ 保留位址**，Node 端會先做 DNS 解析再檢查；**每一次 redirect 都重新檢查**（最多 5 次）。
+  - `HTTP_ALLOW_HOSTS=api.example.com,localhost`：白名單模式，只允許列出的 host（明確列出的 localhost 也可以）。
+  - `HTTP_ALLOW_PRIVATE=1`：本機開發時允許私有位址。
+  - 已知限制：DNS 解析與實際連線之間仍有 DNS rebinding 的空窗；要嚴格限制請用白名單。
+- **檔案節點（進階）** 只能讀寫 `.workspace/`（沙盒）：拒絕絕對路徑、`..`、經由 symlink（含懸空 symlink）逃出沙盒。
+- **後端只接受 Host = localhost / 127.0.0.1 / [::1]**（防 DNS rebinding 從瀏覽器打本機 API / MCP）；綁其他介面時用 `ALLOWED_HOSTS=my-host.example` 設定。API 會檢查 workflow id / run id 格式與 body 形狀；壞掉的 workflow JSON 不會讓編譯器或列表 crash。
+- 每次執行都寫進 `.runs/`（`<run_id>.meta.json`、`.workflow.json`、`.events.jsonl`、`.records.json`）；`.runs/`、`.workspace/` 已列在 `.gitignore`。
+
+## 後端 API（`src/server/app.ts`）
+
+| Method | Path | 說明 |
+|---|---|---|
+| GET | `/api/health` | 狀態 + 目前 runtime（mode / reason）+ registry 節點數 |
+| GET | `/api/registry` | 節點定義；預設只回 v1 節點，`?advanced=1` 回全部 |
+| GET | `/api/workflows`、`/api/workflows/:id` | `workflows/*.json` |
+| PUT | `/api/workflows/:id[?advanced=1]` | 存回 `workflows/<id>.json`；有驗證錯誤回 `422`（避免把被 subflow 引用的 workflow 存成跑不動的版本） |
+| POST | `/api/validate` | `{workflow, advanced?}` → compiler 的 errors / warnings（每個都附 `fix` 修正建議） |
+| POST | `/api/runs` | `{workflow \| workflow_id, inputs, scenario, pass_on, mock_delay_ms}` → `202 {run_id}`；編譯失敗回 `422` |
+| GET | `/api/runs`、`/api/runs/:id` | 執行紀錄列表；單一 run 的 meta + workflow + events + records |
+| GET | `/api/runs/:id/events` | SSE（`event: run`、`id: seq`）；支援 `?after=` / `Last-Event-ID`，先補發歷史再即時推送，結束時送 `event: end` |
+| POST | `/api/runs/:id/cancel` | 取消執行中的 run（AbortSignal 傳到 agent / HTTP / delay） |
+| POST | `/api/runs/:id/resume`（進階） | 以同一份 workflow 重跑，**已成功的 agent 節點沿用上次輸出**（依 scope/node_id 對應），其餘重新執行 |
 | POST | `/mcp` | MCP Streamable HTTP（stateless；GET / DELETE 回 405） |
+
 
 ## 架構（進階：舊格式的 hybrid 引擎）
 
@@ -220,20 +225,6 @@ workflow JSON ◄── Rete editor (web/) ────┘ 同一份 compiler、
 
 | 來源 | 用在哪 |
 |---|---|
-| `rete` / `rete-engine` | headless NodeEditor、DataflowEngine（pull + cache）、ControlFlowEngine（forward） |
-| `rete-area-plugin` / `rete-connection-plugin` / `rete-react-plugin` / `rete-auto-arrange-plugin`（elkjs） | 前端畫布、拖拉連線、React 渲染、自動排版 |
-| `ajv` | JSON Schema 驗證（常數、輸入、輸出、範例） |
-| Circuit `agents/base.ts`、`agents/claude.ts` | Claude Agent SDK adapter（3 處標記 `PoC patch`：可注入 queryFn、輸出 usage 事件、debug log） |
-| Circuit `orchestrator/references.ts` | `{{inputs.x}}` prompt 插值 |
-| `fastify`、`jsonata` | 薄後端 / SSE；Transform 節點的表達式語言 |
-| 自己寫（glue） | `registry.ts`、`compiler.ts`、`schema.ts#isCompatible`、`engine.ts`（hybrid 語意、loop / foreach / subflow、join、skip、retry/timeout、resume、紀錄）、`nodes/builtins.ts`、`server/*`、`runtime/*`、`planner.ts`、`web/src/*` |
-
-設計參考（未複製程式碼）：Circuit `orchestrator/engine.ts`（ready nodes、inactive branch）、Rivet `LoopUntilNode` / `LoopControllerNode`、Google ADK `_join_node.py` / `_retry_config.py`。
-
-## 重用 vs 自己寫
-
-| 來源 | 用在哪 |
-|---|---|
 | `rete` / `rete-engine` | headless NodeEditor、DataflowEngine、ControlFlowEngine |
 | `rete-area-plugin` / `rete-connection-plugin` / `rete-react-plugin` / `rete-auto-arrange-plugin`（elkjs） | 前端畫布、拖拉連線、React 渲染、自動排版 |
 | `ajv` | JSON Schema 驗證 |
@@ -248,7 +239,7 @@ workflow JSON ◄── Rete editor (web/) ────┘ 同一份 compiler、
 ## 已知限制
 
 - Claude runtime 沒有用真 API key 跑過；MCP 設定檔載入、skills 掛載未做。Planner（`npm run plan`）的生成器是 mock。
-- 後端與 MCP HTTP endpoint 沒有驗證 / 多使用者，預設只聽 127.0.0.1；`.runs/` 是 JSON 檔，沒有 DB。
+- 後端與 MCP HTTP endpoint 沒有帳號驗證 / 多使用者（只有 Host header 檢查），預設只聽 127.0.0.1，不要直接對外開放；`.runs/` 是 JSON 檔，沒有 DB。
 - UI 載入 workflow 時，畫不出來的 edge（例如接到不存在的 port）會略過並寫在 Log，不會保留在畫布上。
 - 沒有 git worktree / container 隔離真實 coding agent。
 - v1 範圍審查與簡化理由：`docs/v1-scope-review.md`。
@@ -272,4 +263,8 @@ screenshots/    headless Chrome 截圖
 
 ## 授權
 
+本專案以 **MIT License** 授權（見 [`LICENSE`](LICENSE)，Copyright (c) 2026 GallonShih），**`src/vendor/circuit/` 除外**。
+
 `src/vendor/circuit/` 內的檔案來自 Circuit（[smogili1/circuit](https://github.com/smogili1/circuit) @ `b563153`），以 **Apache License 2.0** 授權（全文見 `src/vendor/circuit/LICENSE`，上游 commit 見 `UPSTREAM_COMMIT`）；修改處以 `PoC patch` 註解標示。
+
+選用的 Claude runtime 依賴 npm 套件 `@anthropic-ai/claude-agent-sdk`（Anthropic 專有授權，不包含在本 repo 內，`npm install` 時才下載；mock runtime 不需要它的服務）。

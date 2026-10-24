@@ -1,3 +1,4 @@
+// Vendored unmodified from smogili1/circuit backend/src/agents/base.ts (Apache-2.0, see ../LICENSE, ../UPSTREAM_COMMIT).
 import { AgentEvent, AgentInput, ExecutionContext } from '../workflows/types.js';
 
 /**

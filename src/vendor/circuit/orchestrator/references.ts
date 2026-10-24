@@ -1,3 +1,4 @@
+// Vendored unmodified from smogili1/circuit backend/src/orchestrator/references.ts (Apache-2.0, see ../LICENSE, ../UPSTREAM_COMMIT).
 /**
  * Reference interpolation utilities for workflow execution.
  * Handles {{NodeName.field}} syntax for referencing upstream node outputs.

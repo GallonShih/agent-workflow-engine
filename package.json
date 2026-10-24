@@ -1,7 +1,7 @@
 {
-  "name": "agent-workflow-poc",
+  "name": "agent-workflow-engine",
   "version": "1.0.0",
-  "description": "Dynamic Agent Workflow Engine PoC (typed ports + hybrid dataflow/control flow + loop composite)",
+  "description": "Typed, registry-driven multi-agent workflow engine: DSL v1 (data edges, condition, loop), Rete.js editor, run monitor, MCP server",
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc -p .",
@@ -19,9 +19,16 @@
     "test:v1": "vitest run --exclude \"test/advanced/**\"",
     "test:advanced": "vitest run test/advanced"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": [
+    "agents",
+    "workflow",
+    "dag",
+    "rete",
+    "mcp",
+    "llm"
+  ],
+  "author": "GallonShih",
+  "license": "MIT",
   "type": "module",
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.310",
@@ -39,5 +46,9 @@
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vitest": "^4.1.12"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/GallonShih/agent-workflow-engine.git"
   }
 }

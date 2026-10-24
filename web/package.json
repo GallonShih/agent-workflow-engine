@@ -9,8 +9,8 @@
     "typecheck": "tsc -p ."
   },
   "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "author": "GallonShih",
+  "license": "MIT",
   "type": "module",
   "dependencies": {
     "ajv": "^8.20.0",
