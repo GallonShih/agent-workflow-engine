@@ -1,22 +1,64 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { compileWorkflow, resolveNodePorts, type BodyPorts, type CompileResult, type Diagnostic, type ResolvedPorts } from '../../src/compiler.js';
+import { bodyPortsAt, boundaryAnnotations, getGraphAt, isDrillable, setGraphAt } from '../../src/graph-path.js';
 import { runWorkflow } from '../../src/engine.js';
 import { demoRuntime } from '../../src/demo/scenario.js';
-import type { RunEvent, WorkflowGraph, WorkflowNode } from '../../src/types.js';
+import type { RunEvent, Scope, WorkflowGraph, WorkflowNode } from '../../src/types.js';
 import demoWorkflow from '../../workflows/fix-until-tests-pass.json';
 import { loadBrowserRegistry } from './registry-browser.js';
 import { createEditor, type EditorApi } from './editor.js';
 import { PropertiesPanel } from './properties.js';
 import { NodeRunPanel, RunHistory, RunSummary, Badge } from './monitor-panel.js';
-import { applyEvent, emptyRun, reduceEvents, statusesFor, type RunView } from './monitor.js';
+import { applyEvent, emptyRun, iterationsOf, reduceEvents, resolveScope, scopeKeyOf, statusesFor, type RunView } from './monitor.js';
 import { backend, type RunMeta } from './api.js';
 
 const STORAGE_KEY = 'agent-workflow-poc:workflow';
 const registry = loadBrowserRegistry();
 const clone = <T,>(x: T): T => JSON.parse(JSON.stringify(x));
-const COMPOSITES = ['loop', 'foreach'];
 const DEMO_INPUTS = { request: '修正 parser 空字串 bug 並讓測試通過', repository: 'github.com/acme/parser' };
+
+/** 打包進前端的 workflows/*.json：瀏覽器模式（沒有 backend）也能開啟 / 執行 subflow */
+const BUNDLED: Record<string, WorkflowGraph> = Object.fromEntries(
+  Object.entries(import.meta.glob('../../workflows/*.json', { eager: true, import: 'default' }) as Record<string, WorkflowGraph>).map(([f, w]) => [f.split('/').pop()!.replace(/\.json$/, ''), w]),
+);
+
+/** 畫布路徑的一層：loop / foreach 的 body，或 subflow 引用的 workflow（唯讀） */
+interface Crumb {
+  id: string;
+  kind: string;
+  label: string;
+  workflowId?: string;
+  /** subflow：drill-in 當下用的子流程結構（run 的快照，或從 workflows/ 載入） */
+  graph?: WorkflowGraph;
+}
+
+/** 依路徑解析目前畫面：要畫的圖、可編輯的 root 與 body 路徑、外層與 composite（算邊界註解用） */
+function resolveView(wf: WorkflowGraph, path: Crumb[]) {
+  let root = wf;
+  let inner: string[] = [];
+  let readOnly = false;
+  let sourceId: string | undefined;
+  let outer: WorkflowGraph | undefined;
+  let composite: WorkflowNode | undefined;
+  for (const c of path) {
+    const g = getGraphAt(root, inner);
+    const n = g?.nodes.find((x) => x.id === c.id);
+    if (!g || !n || !c) return null;
+    outer = g;
+    composite = n;
+    if (n.type === 'subflow') {
+      if (!c.graph) return null;
+      root = c.graph;
+      inner = [];
+      readOnly = true;
+      sourceId = c.workflowId;
+    } else inner = [...inner, n.id];
+  }
+  const graph = getGraphAt(root, inner);
+  if (!graph) return null;
+  return { graph, root, inner, readOnly, sourceId, outer, composite, body: inner.length ? bodyPortsAt(root, inner, registry) : undefined };
+}
 
 type Tab<T extends string> = [T, string];
 function Tabs<T extends string>(props: { tabs: Tab<T>[]; value: T; onChange: (t: T) => void }) {
@@ -41,9 +83,14 @@ function App() {
   });
   const wfRef = useRef(workflow);
   wfRef.current = workflow;
-  const [view, setView] = useState(''); // '' = 外層 DAG；否則 = composite node id（顯示其 body）
-  const viewRef = useRef(view);
-  const [viewIteration, setViewIteration] = useState<number | null>(null); // null = 最新一輪
+  // 畫布路徑（[] = 主流程）與每層選定的 iteration（null = 跟著最新一輪）
+  const [path, setPath] = useState<Crumb[]>([]);
+  const pathRef = useRef(path);
+  const [picks, setPicks] = useState<(number | null)[]>([]);
+  const picksRef = useRef(picks);
+  picksRef.current = picks;
+  /** 「開啟來源 workflow 編輯」前的 workflow，可以返回 */
+  const [backStack, setBackStack] = useState<{ wf: WorkflowGraph; path: Crumb[] }[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [diag, setDiag] = useState<CompileResult | null>(null);
   const [logs, setLogs] = useState<{ msg: string; level: string }[]>([]);
@@ -63,37 +110,21 @@ function App() {
   const [activeRun, setActiveRun] = useState<RunMeta | null>(null);
   const [replay, setReplay] = useState<{ pos: number; total: number } | null>(null);
   const stopStream = useRef<(() => void) | null>(null);
-  const [savedWorkflows, setSavedWorkflows] = useState<{ id: string; name?: string }[]>([]);
+  const [savedWorkflows, setSavedWorkflows] = useState<{ id: string; name?: string }[]>(() => Object.entries(BUNDLED).map(([id, w]) => ({ id, name: w.name })));
 
   const log = (msg: string, level: 'info' | 'error' = 'info') => setLogs((l) => [...l.slice(-400), { msg, level }]);
-  const composites = useMemo(() => workflow.nodes.filter((n) => COMPOSITES.includes(n.type)), [workflow]);
 
   // ------------------------------------------------------------ graph helpers
-  const viewGraph = (wf = wfRef.current, v = viewRef.current): WorkflowGraph => (v ? wf.nodes.find((n) => n.id === v)?.body ?? { nodes: [], edges: [] } : wf);
-  const bodyPortsFor = (v: string, wf = wfRef.current): BodyPorts | undefined => {
-    if (!v) return undefined;
-    const c = wf.nodes.find((n) => n.id === v);
-    if (!c) return undefined;
-    try {
-      return resolveNodePorts(c, registry.get(c.type)!, registry).body;
-    } catch {
-      return undefined;
-    }
-  };
+  const viewOf = (wf = wfRef.current, p = pathRef.current) => resolveView(wf, p);
+  const viewGraph = (wf = wfRef.current, p = pathRef.current): WorkflowGraph => viewOf(wf, p)?.graph ?? { nodes: [], edges: [] };
+  const readOnlyNow = () => !!viewOf()?.readOnly;
 
-  /** 把目前畫面（外層或某 composite body）的編輯寫回完整 workflow */
+  /** 把目前畫面（主流程或任意深度的 body）的編輯寫回「同一份」workflow JSON 的對應巢狀位置 */
   function commit(): WorkflowGraph {
     if (!api.current) return wfRef.current;
-    const g = api.current.exportGraph();
-    const v = viewRef.current;
-    const wf = clone(wfRef.current);
-    if (!v) {
-      wf.nodes = g.nodes.map((n) => ({ ...n, body: wf.nodes.find((o) => o.id === n.id)?.body ?? n.body }));
-      wf.edges = g.edges;
-    } else {
-      const c = wf.nodes.find((n) => n.id === v);
-      if (c) c.body = g;
-    }
+    const v = viewOf();
+    if (!v || v.readOnly) return wfRef.current; // subflow 畫面唯讀：不寫回
+    const wf = setGraphAt(wfRef.current, v.inner, api.current.exportGraph());
     wfRef.current = wf;
     setWorkflow(wf);
     return wf;
@@ -105,14 +136,15 @@ function App() {
     const wf = commit();
     const r = compileWorkflow(wf, registry);
     setDiag(r);
-    const v = viewRef.current;
-    const prefix = v ? `${v}.body/` : '';
+    const v = viewOf(wf);
     const counts: Record<string, number> = {};
-    for (const e of r.errors) {
-      if (!e.node) continue;
-      if (e.node.startsWith(prefix) && !e.node.slice(prefix.length).includes('/')) counts[e.node.slice(prefix.length)] = (counts[e.node.slice(prefix.length)] ?? 0) + 1;
-      else if (!v && e.node.includes('.body/')) {
-        const owner = e.node.split('.body/')[0];
+    if (v && !v.readOnly) {
+      // 錯誤的 node 欄位帶完整巢狀路徑（a.body/b.body/x）：本層節點直接算，更深層的算到本層的 composite 上
+      const prefix = v.inner.map((id) => `${id}.body/`).join('');
+      for (const e of r.errors) {
+        if (!e.node?.startsWith(prefix)) continue;
+        const rest = e.node.slice(prefix.length);
+        const owner = rest.includes('/') ? rest.split('.body/')[0] : rest;
         counts[owner] = (counts[owner] ?? 0) + 1;
       }
     }
@@ -125,34 +157,107 @@ function App() {
   };
 
   // ------------------------------------------------------------ view / status
-  const latestIteration = (v: string) => {
-    const its = runRef.current.iterations[v] ?? [];
-    return its.length ? Math.max(...its) : 0;
-  };
-  const effIteration = (v = viewRef.current) => (v ? (viewIteration ?? latestIteration(v)) : null);
-  const effIterRef = useRef<number | null>(null);
-  effIterRef.current = view ? (viewIteration ?? latestIteration(view)) : null;
+  /** 目前畫面對應的執行 scope（每層 iteration 已解析；null 的層跟著最新一輪） */
+  const currentScope = (): Scope => resolveScope(runRef.current, pathRef.current.map((c) => c.id), picksRef.current);
   const paintScheduled = useRef(false);
   function paint() {
     if (paintScheduled.current) return;
     paintScheduled.current = true;
     requestAnimationFrame(() => {
       paintScheduled.current = false;
-      const v = viewRef.current;
-      api.current?.setStatuses(statusesFor(runRef.current, v, v ? (effIterRef.current ?? latestIteration(v)) : null));
+      api.current?.setStatuses(statusesFor(runRef.current, currentScope()));
       setTick((t) => t + 1);
     });
   }
-  useEffect(paint, [view, viewIteration]);
+  useEffect(paint, [path, picks]);
 
-  async function show(v: string, wf = wfRef.current) {
+  async function show(p: Crumb[], pk: (number | null)[] = p.map(() => null), wf = wfRef.current) {
     if (!api.current) return;
-    viewRef.current = v;
-    setView(v);
+    let v = resolveView(wf, p);
+    if (!v) {
+      log(`找不到路徑 ${p.map((c) => c.id).join(' › ')}，回到主流程`, 'error');
+      p = [];
+      pk = [];
+      v = resolveView(wf, [])!;
+    }
+    pathRef.current = p;
+    picksRef.current = pk;
+    setPath(p);
+    setPicks(pk);
     setSelected(null);
-    await api.current.load(viewGraph(wf, v), bodyPortsFor(v, wf));
+    const boundaries: Record<string, string> = {};
+    for (const n of v.graph.nodes) {
+      if (n.type === 'loop_in') boundaries[n.id] = '輸入邊界';
+      if (n.type === 'loop_out') boundaries[n.id] = '輸出邊界';
+      if (v.composite?.type === 'subflow' && !v.inner.length && n.type === 'start') boundaries[n.id] = '子流程輸入';
+      if (v.composite?.type === 'subflow' && !v.inner.length && n.type === 'end') boundaries[n.id] = '子流程輸出';
+    }
+    const annotations = v.composite && v.outer ? boundaryAnnotations(v.outer, v.composite, v.graph) : undefined;
+    await api.current.load(v.graph, { body: v.body, readOnly: v.readOnly, annotations, boundaries });
     validateNow();
     paint();
+  }
+
+  /** 取得 saved workflow：backend 的 /api/workflows/:id，沒有 backend 時用打包進前端的 workflows/*.json */
+  async function loadWorkflowSource(id: string): Promise<WorkflowGraph | undefined> {
+    if (backendInfoRef.current) {
+      const r = await fetch(`/api/workflows/${encodeURIComponent(id)}`).catch(() => null);
+      if (r?.ok) return r.json();
+    }
+    return BUNDLED[id] ? clone(BUNDLED[id]) : undefined;
+  }
+
+  /** drill-in：雙擊 loop / foreach / subflow，或從屬性 / 監控面板進入（可指定 iteration） */
+  async function drill(id: string, iteration: number | null = null) {
+    const v = viewOf();
+    const n = v?.graph.nodes.find((x) => x.id === id);
+    if (!v || !n || !isDrillable(n)) return;
+    const wf = commit();
+    const crumb: Crumb = { id, kind: n.type, label: n.label || n.id };
+    if (n.type === 'subflow') {
+      const wid = String(n.config?.workflow ?? '');
+      const snap = runRef.current.subflows[`${scopeKeyOf(currentScope())}/${id}`];
+      crumb.workflowId = wid;
+      crumb.graph = snap?.workflow ?? (await loadWorkflowSource(wid));
+      if (!crumb.graph) return log(`找不到子流程 workflow「${wid}」`, 'error');
+      log(`⤵ 進入 subflow ${id} → ${wid}（${snap ? '本次 run 的快照' : '目前 workflows/ 的版本'}，唯讀）`);
+    }
+    await show([...pathRef.current, crumb], [...picksRef.current, iteration], wf);
+  }
+  async function navigate(depth: number) {
+    const wf = commit();
+    await show(pathRef.current.slice(0, depth), picksRef.current.slice(0, depth), wf);
+  }
+  /** subflow 畫面 →「開啟來源 workflow 編輯」：把來源 workflow 載入成主流程（可再返回） */
+  async function openSource() {
+    const v = viewOf();
+    if (!v?.sourceId) return;
+    const src = await loadWorkflowSource(v.sourceId);
+    if (!src) return log(`找不到來源 workflow「${v.sourceId}」`, 'error');
+    setBackStack((s) => [...s, { wf: wfRef.current, path: pathRef.current }]);
+    resetRun();
+    wfRef.current = { ...src, id: v.sourceId };
+    setWorkflow(wfRef.current);
+    await show([], [], wfRef.current);
+    log(`✎ 開啟來源 workflow「${v.sourceId}」編輯（存回 workflows/ 會影響所有引用它的 workflow）`);
+  }
+  async function goBack() {
+    const prev = backStack[backStack.length - 1];
+    if (!prev) return;
+    setBackStack((s) => s.slice(0, -1));
+    resetRun();
+    wfRef.current = prev.wf;
+    setWorkflow(prev.wf);
+    await show([], [], prev.wf);
+  }
+  async function saveToServer() {
+    const wf = commit();
+    const id = wf.id;
+    if (!id) return log('這份 workflow 沒有 id，無法存回 workflows/', 'error');
+    const r = await fetch(`/api/workflows/${encodeURIComponent(id)}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(wf) });
+    const body = await r.json().catch(() => ({}));
+    if (r.ok) log(`💾 已存回 workflows/${id}.json`);
+    else log(`存回失敗（${r.status}）：${body.error ?? ''}${body.errors ? ' — ' + body.errors.map((e: Diagnostic) => e.message).join('；') : ''}`, 'error');
   }
 
   useEffect(() => {
@@ -161,14 +266,16 @@ function App() {
       log,
       onSelect: (id) => setSelected(id),
       onChange: scheduleValidate,
+      onOpen: (id) => void drillRef.current(id),
     }).then(async (e) => {
       if (disposed) return e.destroy();
       api.current = e;
-      await show('');
+      await show([]);
     });
     void backend.health().then((h) => {
       if (!h) return log('backend 未啟動 → 使用瀏覽器內執行（npm run server 可啟用 backend 執行 / SSE / 歷史紀錄）');
       setBackendInfo(h);
+      backendInfoRef.current = h;
       setMode('backend');
       log(`已連上 backend（runtime: ${h.runtime.mode} — ${h.runtime.reason}）`);
       void refreshRuns();
@@ -187,6 +294,9 @@ function App() {
   }, []);
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
+  const drillRef = useRef(drill);
+  drillRef.current = drill;
+  const backendInfoRef = useRef(backendInfo);
 
   // ------------------------------------------------------------ node edits
   async function updateNode(next: WorkflowNode) {
@@ -195,7 +305,7 @@ function App() {
   }
   async function deleteNode(id: string) {
     const n = viewGraph().nodes.find((x) => x.id === id);
-    if (!n || ['loop_in', 'loop_out'].includes(n.type)) return;
+    if (!n || ['loop_in', 'loop_out'].includes(n.type) || readOnlyNow()) return;
     await api.current?.removeNode(id);
     log(`刪除節點 ${id}`);
     validateNow();
@@ -215,7 +325,8 @@ function App() {
     runRef.current = emptyRun();
     eventsRef.current = [];
     setReplay(null);
-    setViewIteration(null);
+    picksRef.current = pathRef.current.map(() => null);
+    setPicks(picksRef.current);
     paint();
   }
   const onRunEvent = (e: RunEvent) => {
@@ -251,7 +362,16 @@ function App() {
     const result = await runWorkflow(r.graph, DEMO_INPUTS, {
       runtime: demoRuntime({ passOnIteration: scenario === 'pass' ? 2 : null, flakyCoder: true, delayMs: 250 }),
       onEvent: onRunEvent,
-      services: { fetch: window.fetch.bind(window) },
+      // subflow 在瀏覽器模式：從 backend 或打包的 workflows/*.json 載入，用瀏覽器端 registry 編譯
+      services: {
+        fetch: window.fetch.bind(window),
+        registry,
+        loadWorkflow: async (id: string) => {
+          const w = await loadWorkflowSource(id);
+          if (!w) throw new Error(`workflow "${id}" not found`);
+          return w;
+        },
+      },
     });
     setActiveRun({ run_id: result.run_id, workflow_name: wfRef.current.name ?? '', status: result.status, started_at: Date.now(), source: 'browser', runtime: 'mock' });
     setRunning(false);
@@ -282,7 +402,7 @@ function App() {
       if (r.workflow) {
         wfRef.current = r.workflow;
         setWorkflow(r.workflow);
-        await show('', r.workflow);
+        await show([], [], r.workflow);
       }
       setActiveRun(r.meta);
       setRightTab('run');
@@ -343,15 +463,17 @@ function App() {
       const wf = JSON.parse(text) as WorkflowGraph;
       wfRef.current = wf;
       setWorkflow(wf);
-      await show('', wf);
+      setBackStack([]);
+      await show([], [], wf);
       log('📂 已載入 workflow JSON');
     } catch (e) {
       log(`JSON 解析失敗：${(e as Error).message}`, 'error');
     }
   }
   async function loadSaved(id: string) {
-    const wf = await fetch(`/api/workflows/${id}`).then((r) => r.json());
-    await loadJson(JSON.stringify(wf));
+    const wf = await loadWorkflowSource(id);
+    if (!wf) return log(`找不到 workflow「${id}」`, 'error');
+    await loadJson(JSON.stringify({ ...wf, id }));
   }
   async function reset() {
     localStorage.removeItem(STORAGE_KEY);
@@ -366,19 +488,21 @@ function App() {
   }
 
   // ------------------------------------------------------------ derived for panels
-  const g = viewGraph(workflow, view);
+  const cur = resolveView(workflow, path);
+  const g = cur?.graph ?? { nodes: [], edges: [] };
+  const readOnly = !!cur?.readOnly;
   const selNode = selected ? g.nodes.find((n) => n.id === selected) : undefined;
   const selDef = selNode ? registry.get(selNode.type) : undefined;
   let selPorts: ResolvedPorts | null = null;
   if (selNode && selDef) {
     try {
-      selPorts = resolveNodePorts(selNode, selDef, registry, bodyPortsFor(view, workflow));
+      selPorts = resolveNodePorts(selNode, selDef, registry, cur?.body);
     } catch {
       selPorts = null;
     }
   }
-  const prefix = view ? `${view}.body/` : '';
-  const selErrors: Diagnostic[] = selected ? (diag?.errors ?? []).filter((e) => e.node === prefix + selected || (!view && e.node?.startsWith(`${selected}.body/`))) : [];
+  const prefix = (cur?.inner ?? []).map((id) => `${id}.body/`).join('');
+  const selErrors: Diagnostic[] = selected && !readOnly ? (diag?.errors ?? []).filter((e) => e.node === prefix + selected || e.node?.startsWith(`${prefix}${selected}.body/`)) : [];
   const connected = new Set(g.edges.filter((e) => e.kind === 'data' && e.to.node === selected).map((e) => e.to.port));
   const library = useMemo(() => {
     const groups: Record<string, string[]> = {};
@@ -391,7 +515,7 @@ function App() {
   }, []);
   const btn = { padding: '5px 9px', cursor: 'pointer' } as const;
   const run_ = runRef.current;
-  const iterList = view ? (run_.iterations[view] ?? []) : [];
+  const scope = resolveScope(run_, path.map((c) => c.id), picks);
 
   return (
     <div style={{ display: 'grid', gridTemplateRows: 'auto 1fr', height: '100%' }}>
@@ -399,16 +523,6 @@ function App() {
       {/* ---------------- toolbar ---------------- */}
       <div style={{ padding: '6px 10px', borderBottom: '1px solid #ddd', display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', fontSize: 12 }}>
         <b style={{ marginRight: 8, fontSize: 14 }}>Agent Workflow Editor</b>
-        <select data-testid="view-select" value={view} onChange={(e) => { commit(); void show(e.target.value); }} style={btn}>
-          <option value="">外層 DAG</option>
-          {composites.map((l) => <option key={l.id} value={l.id}>{l.id} body（{l.type}）</option>)}
-        </select>
-        {view && iterList.length > 0 && (
-          <select data-testid="view-iteration" style={btn} value={viewIteration ?? ''} onChange={(e) => setViewIteration(e.target.value === '' ? null : Number(e.target.value))}>
-            <option value="">最新一輪（#{latestIteration(view)}）</option>
-            {iterList.map((i) => <option key={i} value={i}>iteration #{i}</option>)}
-          </select>
-        )}
         <span style={{ borderLeft: '1px solid #ddd', height: 22 }} />
         <select data-testid="run-mode" value={mode} onChange={(e) => setMode(e.target.value as 'backend' | 'browser')} style={btn}>
           <option value="backend" disabled={!backendInfo}>Backend 執行{backendInfo ? `（${backendInfo.runtime.mode}）` : '（未連線）'}</option>
@@ -423,6 +537,7 @@ function App() {
         <span style={{ borderLeft: '1px solid #ddd', height: 22 }} />
         <button style={btn} onClick={() => void api.current?.layout()}>自動排版</button>
         <button style={btn} onClick={save}>存檔</button>
+        {backendInfo && workflow.id && <button style={btn} data-testid="save-server" onClick={() => void saveToServer()} title="PUT /api/workflows/:id（有驗證錯誤會被拒絕）">存回 workflows/{workflow.id}.json</button>}
         <button style={btn} onClick={download}>下載 JSON</button>
         {savedWorkflows.length > 0 && (
           <select value="" style={btn} onChange={(e) => e.target.value && void loadSaved(e.target.value)}>
@@ -464,7 +579,65 @@ function App() {
 
         {/* ---------------- center: canvas + bottom ---------------- */}
         <div style={{ display: 'grid', gridTemplateRows: '1fr 170px', minHeight: 0, minWidth: 0 }}>
-          <div ref={container} data-testid="canvas" style={{ position: 'relative', background: '#f8fafc', minHeight: 0, overflow: 'hidden' }} />
+          <div style={{ display: 'grid', gridTemplateRows: 'auto 1fr', minHeight: 0 }}>
+            {/* ---------------- breadcrumb（drill-down 導覽） ---------------- */}
+            <div data-testid="breadcrumb" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 4, padding: '5px 10px', borderBottom: '1px solid #e2e8f0', background: '#fff', fontSize: 13 }}>
+              {backStack.length > 0 && <button data-testid="go-back" style={btn} onClick={() => void goBack()}>← 返回 {backStack[backStack.length - 1].wf.name ?? backStack[backStack.length - 1].wf.id ?? '上一個 workflow'}</button>}
+              <span data-crumb={0} onClick={() => path.length && void navigate(0)} style={{ cursor: path.length ? 'pointer' : 'default', fontWeight: path.length ? 400 : 700, color: path.length ? '#2563eb' : '#0f172a' }}>
+                主流程{workflow.id ? `（${workflow.id}）` : ''}
+              </span>
+              {path.map((c, i) => {
+                const last = i === path.length - 1;
+                const its = c.kind === 'subflow' ? [] : iterationsOf(run_, scope.slice(0, i), c.id);
+                return (
+                  <span key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                    <span style={{ color: '#94a3b8' }}>›</span>
+                    <span data-crumb={i + 1} onClick={() => !last && void navigate(i + 1)}
+                      style={{ cursor: last ? 'default' : 'pointer', fontWeight: last ? 700 : 400, color: last ? '#0f172a' : '#2563eb' }}>
+                      {c.id}
+                      <span style={{ color: '#64748b', fontWeight: 400 }}>（{c.kind === 'subflow' ? `subflow → ${c.workflowId}` : c.kind}）</span>
+                    </span>
+                    {its.length > 0 && (
+                      <select data-crumb-iteration={i + 1} value={picks[i] ?? ''} style={{ fontSize: 12 }}
+                        onChange={(e) => setPicks((p) => { const n = [...p]; n[i] = e.target.value === '' ? null : Number(e.target.value); picksRef.current = n; return n; })}>
+                        <option value="">最新（#{its[its.length - 1]}）</option>
+                        {its.map((it) => <option key={it} value={it}>#{it}</option>)}
+                      </select>
+                    )}
+                  </span>
+                );
+              })}
+              <span style={{ marginLeft: 'auto', color: '#94a3b8', fontSize: 12 }}>雙擊 loop / foreach / subflow 節點進入子圖</span>
+            </div>
+            <div style={{ position: 'relative', minHeight: 0 }}>
+              <div ref={container} data-testid="canvas" style={{ position: 'absolute', inset: 0, background: readOnly ? '#f5f3ff' : '#f8fafc', overflow: 'hidden' }} />
+              {cur?.composite && (
+                <div data-testid="scope-banner" style={{ position: 'absolute', top: 8, left: 8, right: 8, zIndex: 5, pointerEvents: 'none', display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                  <div style={{ pointerEvents: 'auto', background: 'rgba(255,255,255,.95)', border: `1px solid ${readOnly ? '#a78bfa' : '#cbd5e1'}`, borderRadius: 6, padding: '6px 10px', fontSize: 12, maxWidth: 640 }}>
+                    {readOnly ? (
+                      <>
+                        <b>🔒 唯讀：sub-workflow「{cur.sourceId}」</b>
+                        <div style={{ color: '#475569' }}>這份 workflow 可能被其他 workflow 引用，這裡不能直接改。{scope.length && run_.subflows[`${scopeKeyOf(scope.slice(0, path.findIndex((c) => c.kind === 'subflow')))}/${path.find((c) => c.kind === 'subflow')!.id}`] ? '顯示的是本次 run 的快照與執行資料。' : ''}</div>
+                        <button data-testid="open-source" style={{ marginTop: 4 }} onClick={() => void openSource()}>✎ 開啟來源 workflow 編輯</button>
+                      </>
+                    ) : (
+                      <>
+                        <b>{cur.composite.id} 的 body（{cur.composite.type}）</b>
+                        {cur.composite.type === 'loop' && (
+                          <span style={{ color: '#475569' }}>
+                            {' '}· 最多 {String(cur.composite.config?.max_iterations ?? '?')} 輪
+                            {(cur.composite.config?.until as { port?: string } | undefined)?.port ? ` · until ${(cur.composite.config!.until as { port: string }).port}` : ''}
+                            {((cur.composite.config?.carry as { from: string; to: string }[] | undefined) ?? []).map((c) => ` · carry ${c.from} → ${c.to}`).join('')}
+                          </span>
+                        )}
+                        <div style={{ color: '#475569' }}>紫色虛線框 = 邊界節點；port 後面的「← / →」是外層對應。可直接新增節點、連線、改屬性，存檔寫回同一份 JSON 的巢狀位置。</div>
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
           <div style={{ borderTop: '1px solid #ddd', display: 'grid', gridTemplateRows: 'auto 1fr', minHeight: 0 }}>
             <Tabs tabs={[['diag', `Diagnostics${diag ? `（${diag.errors.length}/${diag.warnings.length}）` : ''}`], ['log', 'Log'], ['json', 'Workflow JSON']]} value={bottomTab} onChange={(t) => { setBottomTab(t); if (t === 'json') setJsonText(JSON.stringify(commit(), null, 2)); }} />
             <div style={{ overflow: 'auto', fontSize: 12, padding: bottomTab === 'json' ? 0 : 8, minHeight: 0 }}>
@@ -518,7 +691,7 @@ function App() {
                 點選畫布上的節點以編輯屬性或查看執行結果。
                 {rightTab === 'run' && run_.status !== 'idle' && (
                   <div style={{ marginTop: 8 }}>
-                    {[...run_.records.values()].filter((r) => r.scopeKey === (view ? `${view}#${effIteration()}` : 'root')).map((r) => (
+                    {[...run_.records.values()].filter((r) => r.scopeKey === scopeKeyOf(scope)).map((r) => (
                       <div key={r.key} style={{ display: 'flex', gap: 6, margin: '3px 0', cursor: 'pointer' }} onClick={() => api.current?.select(r.node_id)}>
                         <Badge status={r.status} /> <span>{r.node_id}</span> <span style={{ color: '#94a3b8' }}>{r.duration_ms !== undefined ? `${r.duration_ms} ms` : ''}</span>
                       </div>
@@ -528,14 +701,20 @@ function App() {
               </div>
             )}
             {selNode && selDef && rightTab === 'props' && (
-              <PropertiesPanel key={`${view}/${selNode.id}`} node={selNode} def={selDef} registry={registry} ports={selPorts} errors={selErrors} connectedInputs={connected}
-                onChange={(n) => void updateNode(n)} onDelete={() => void deleteNode(selNode.id)}
-                onOpenBody={!view && COMPOSITES.includes(selNode.type) ? () => { commit(); void show(selNode.id); } : undefined} />
+              <>
+                {readOnly && <div style={{ padding: '8px 12px', fontSize: 12, background: '#f5f3ff', color: '#5b21b6' }}>🔒 sub-workflow 唯讀：屬性僅供檢視</div>}
+                <fieldset disabled={readOnly} style={{ border: 0, margin: 0, padding: 0, minWidth: 0 }}>
+                  <PropertiesPanel key={`${path.map((c) => c.id).join('/')}/${selNode.id}`} node={selNode} def={selDef} registry={registry} ports={selPorts} errors={selErrors} connectedInputs={connected}
+                    onChange={(n) => void updateNode(n)} onDelete={() => void deleteNode(selNode.id)}
+                    onOpenBody={isDrillable(selNode) ? () => void drill(selNode.id) : undefined} />
+                </fieldset>
+                {readOnly && isDrillable(selNode) && <div style={{ padding: '0 12px 12px' }}><button onClick={() => void drill(selNode.id)}>進入子圖</button></div>}
+              </>
             )}
             {selNode && rightTab === 'run' && (
-              <NodeRunPanel run={run_} view={view} nodeId={selNode.id} def={selDef} iteration={effIteration()}
-                onIteration={(i) => setViewIteration(i)}
-                onOpenIteration={!view && COMPOSITES.includes(selNode.type) ? (i) => { commit(); void show(selNode.id).then(() => setViewIteration(i)); } : undefined} />
+              <NodeRunPanel run={run_} scope={scope} nodeId={selNode.id} def={selDef}
+                onIteration={(i) => setPicks((p) => { const n = [...p]; n[path.length - 1] = i; picksRef.current = n; return n; })}
+                onOpenIteration={isDrillable(selNode) ? (i) => void drill(selNode.id, i) : undefined} />
             )}
           </div>
         </div>

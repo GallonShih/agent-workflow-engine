@@ -128,7 +128,7 @@ function compileGraph(
   loop: BodyPorts | undefined,
 ): CompiledGraph {
   const err = (code: string, message: string, extra: Partial<Diagnostic> = {}) =>
-    errors.push({ code, message: prefix + message, ...extra, node: extra.node ? prefix + extra.node : undefined });
+    errors.push({ code, message: prefix + message, ...extra, node: extra.node ? prefix + extra.node : undefined, path: prefix });
   const nodes = new Map<string, CompiledNode>();
 
   if (!Array.isArray(wf?.nodes) || !Array.isArray(wf?.edges)) {
@@ -231,7 +231,7 @@ function compileGraph(
     }
     const hasControlIn = wf.edges.some((e) => e.kind === 'control' && e.to.node === cn.id);
     if (cn.def.mode === 'control' && cn.controlInputs.length > 0 && !hasControlIn)
-      warnings.push({ code: 'ENTRY_NODE', message: `${prefix}node "${cn.id}" has no incoming control edge — it runs as an entry node`, node: cn.id });
+      warnings.push({ code: 'ENTRY_NODE', message: `${prefix}node "${cn.id}" has no incoming control edge — it runs as an entry node`, node: prefix + cn.id, path: prefix });
   }
 
   // ---- 外層 DAG：不允許 cycle（Loop 必須用 composite node 表達） ----

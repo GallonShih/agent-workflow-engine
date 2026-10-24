@@ -174,6 +174,7 @@ export interface RunEvent {
     | 'agent_event'
     | 'loop_iteration_started'
     | 'loop_iteration_completed'
+    | 'subflow_started'
     | 'log';
   node_id?: string;
   key?: string;

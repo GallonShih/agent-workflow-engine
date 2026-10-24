@@ -113,3 +113,38 @@ describe('backend API (Fastify)', () => {
     expect(list.find((r) => r.run_id === 'run_old')).toMatchObject({ status: 'interrupted', legacy: true });
   });
 });
+
+describe('nested-review demo + workflow save (backend)', () => {
+  const wfDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wf-dir-'));
+  for (const f of fs.readdirSync(path.join(root, 'workflows'))) fs.copyFileSync(path.join(root, 'workflows', f), path.join(wfDir, f));
+  const app2 = buildServer({ root, runsDir: fs.mkdtempSync(path.join(os.tmpdir(), 'wf-runs2-')), mockDelayMs: 0, workflowsDir: wfDir });
+  afterAll(() => app2.close());
+
+  it('runs subflow + nested loops; run record keeps the subflow snapshot and outer#i/inner#j records', async () => {
+    const wf = (await app2.inject('/api/workflows/nested-review')).json();
+    const r = await app2.inject({ method: 'POST', url: '/api/runs', payload: { workflow: wf, workflow_id: 'nested-review', inputs: { request: 'x', repository: 'y' } } });
+    expect(r.statusCode).toBe(202);
+    const id = r.json().run_id as string;
+    await app2.runs.get(id)!.done;
+    const run = (await app2.inject(`/api/runs/${id}`)).json();
+    expect(run.meta.status).toBe('success');
+    const keys = run.records.map((x: NodeRunRecord) => x.key.slice(id.length + 1));
+    expect(keys).toEqual(expect.arrayContaining(['plan#0/planner', 'review_rounds#0/fix_loop#2/tester', 'review_rounds#1/fix_loop#0/coder', 'review_rounds#1/note']));
+    const snap = run.events.find((e: RunEvent) => e.type === 'subflow_started');
+    expect(snap.data.workflow_id).toBe('plan-subflow');
+    expect(snap.data.workflow.nodes.map((n: { id: string }) => n.id)).toEqual(['start', 'planner', 'end']);
+  });
+
+  it('PUT /api/workflows/:id saves valid workflows and rejects invalid ones (422)', async () => {
+    const wf = (await app2.inject('/api/workflows/plan-subflow')).json();
+    wf.name = '改過的子流程';
+    const ok = await app2.inject({ method: 'PUT', url: '/api/workflows/plan-subflow', payload: wf });
+    expect(ok.statusCode).toBe(200);
+    expect(JSON.parse(fs.readFileSync(path.join(wfDir, 'plan-subflow.json'), 'utf8')).name).toBe('改過的子流程');
+    wf.edges.push({ kind: 'data', from: { node: 'start', port: 'nope' }, to: { node: 'end', port: 'plan' } });
+    const bad = await app2.inject({ method: 'PUT', url: '/api/workflows/plan-subflow', payload: wf });
+    expect(bad.statusCode).toBe(422);
+    expect(bad.json().errors.length).toBeGreaterThan(0);
+    expect((await app2.inject({ method: 'PUT', url: '/api/workflows/..%2Fx', payload: wf })).statusCode).toBe(400);
+  });
+});

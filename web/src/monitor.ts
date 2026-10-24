@@ -1,4 +1,4 @@
-import type { AgentEvent, NodeStatus, RunEvent, Scope, TokenUsage } from '../../src/types.js';
+import type { AgentEvent, NodeStatus, RunEvent, Scope, TokenUsage, WorkflowGraph } from '../../src/types.js';
 
 /** 前端的執行狀態：把事件流（in-browser 或 backend SSE / 歷史紀錄）歸約成以 scope/node_id 為鍵的紀錄 */
 export interface RecView {
@@ -29,8 +29,10 @@ export interface RunView {
   run_id?: string;
   status: 'idle' | 'running' | 'success' | 'failed' | 'cancelled' | 'interrupted';
   records: Map<string, RecView>;
-  /** composite node id → 已開始的 iteration 編號 */
+  /** composite 的 record key（`<父 scopeKey>/<node_id>`，例如 review_rounds#1/fix_loop）→ 已開始的 iteration 編號 */
   iterations: Record<string, number[]>;
+  /** subflow 的 record key → 執行當下的子流程快照（subflow_started 事件） */
+  subflows: Record<string, { workflow_id: string; workflow: WorkflowGraph }>;
   started_at?: number;
   ended_at?: number;
   token_usage: TokenUsage;
@@ -38,7 +40,7 @@ export interface RunView {
   lastSeq: number;
 }
 
-export const emptyRun = (): RunView => ({ status: 'idle', records: new Map(), iterations: {}, token_usage: { input_tokens: 0, output_tokens: 0 }, eventCount: 0, lastSeq: 0 });
+export const emptyRun = (): RunView => ({ status: 'idle', records: new Map(), iterations: {}, subflows: {}, token_usage: { input_tokens: 0, output_tokens: 0 }, eventCount: 0, lastSeq: 0 });
 
 export const scopeKeyOf = (scope: Scope = []) => (scope.length ? scope.map((s) => `${s.loop}#${s.iteration}`).join('/') : 'root');
 
@@ -59,10 +61,14 @@ export function applyEvent(run: RunView, e: RunEvent): RunView {
     return run;
   }
   if (!e.node_id) return run;
-  if (e.type === 'loop_iteration_started' || e.type === 'loop_iteration_completed') {
-    const it = d.iteration as number;
-    const list = (run.iterations[e.node_id] ??= []);
+  if (e.type === 'loop_iteration_started' || e.type === 'loop_iteration_completed' || e.type === 'subflow_started') {
+    // 這些事件的 scope 是「內層」scope；父 scope = 去掉最後一層
+    const inner = e.scope ?? [];
+    const ck = `${scopeKeyOf(inner.slice(0, -1))}/${e.node_id}`;
+    const it = e.type === 'subflow_started' ? 0 : (d.iteration as number);
+    const list = (run.iterations[ck] ??= []);
     if (!list.includes(it)) list.push(it);
+    if (e.type === 'subflow_started') run.subflows[ck] = { workflow_id: d.workflow_id as string, workflow: d.workflow as WorkflowGraph };
     return run;
   }
   const scope = e.scope ?? [];
@@ -130,17 +136,46 @@ export function reduceEvents(events: RunEvent[]): RunView {
   return run;
 }
 
-/** 目前畫面（外層或某 composite 的某一輪）要顯示的節點狀態 */
-export function statusesFor(run: RunView, view: string, iteration: number | null): Record<string, NodeStatus> {
-  const sk = view ? `${view}#${iteration ?? 0}` : 'root';
+/** 畫布目前所在的 scope：由外到內每層 composite / subflow 的 node id 與選定的 iteration */
+export type ScopeSel = { loop: string; iteration: number }[];
+
+/** 某 composite 在 parent scope 底下已開始的輪次 */
+export function iterationsOf(run: RunView, parent: Scope, nodeId: string): number[] {
+  return [...(run.iterations[`${scopeKeyOf(parent)}/${nodeId}`] ?? [])].sort((a, b) => a - b);
+}
+
+/**
+ * 把每層「使用者選的 iteration（null = 跟著最新）」解析成實際 scope。
+ * 外層換輪次時，內層若選了不存在的輪次就退回該外層輪次的最新一輪。
+ */
+export function resolveScope(run: RunView, path: string[], picks: (number | null)[]): ScopeSel {
+  const out: ScopeSel = [];
+  for (let i = 0; i < path.length; i++) {
+    const avail = iterationsOf(run, out, path[i]);
+    const want = picks[i];
+    const it = want !== null && want !== undefined && avail.includes(want) ? want : avail.length ? avail[avail.length - 1] : (want ?? 0);
+    out.push({ loop: path[i], iteration: it });
+  }
+  return out;
+}
+
+/** 目前 scope 要顯示的節點狀態 */
+export function statusesFor(run: RunView, scope: Scope): Record<string, NodeStatus> {
+  const sk = scopeKeyOf(scope);
   const out: Record<string, NodeStatus> = {};
   for (const r of run.records.values()) if (r.scopeKey === sk) out[r.node_id] = r.status;
   return out;
 }
 
-/** 某節點在所有 scope 的紀錄（per-iteration 歷史） */
-export function recordsForNode(run: RunView, view: string, nodeId: string): RecView[] {
-  return [...run.records.values()]
-    .filter((r) => r.node_id === nodeId && (view ? r.scope.length >= 1 && r.scope[r.scope.length - 1].loop === view && r.scope.length === 1 : r.scopeKey === 'root'))
-    .sort((a, b) => (a.iteration ?? 0) - (b.iteration ?? 0));
+/** 某節點在「最內層 composite 的每一輪」的紀錄（外層輪次固定為目前選的） */
+export function recordsForNode(run: RunView, scope: Scope, nodeId: string): RecView[] {
+  if (!scope.length) {
+    const r = run.records.get(`root/${nodeId}`);
+    return r ? [r] : [];
+  }
+  const parent = scope.slice(0, -1);
+  const last = scope[scope.length - 1];
+  return iterationsOf(run, parent, last.loop)
+    .map((it) => run.records.get(`${scopeKeyOf([...parent, { loop: last.loop, iteration: it }])}/${nodeId}`))
+    .filter((r): r is RecView => !!r);
 }

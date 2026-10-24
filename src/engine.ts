@@ -408,9 +408,13 @@ export class GraphRun {
     if (!services.loadWorkflow || !services.registry) throw new Error('subflow needs services.loadWorkflow + services.registry (run through the backend / CLI)');
     if (this.scope.length >= 8) throw new Error('subflow nesting too deep (max 8 scopes)');
     const id = String(cn.node.config?.workflow);
-    const compiled = compileWorkflow(await services.loadWorkflow(id), services.registry);
+    const source = await services.loadWorkflow(id);
+    const compiled = compileWorkflow(source, services.registry);
     if (!compiled.ok) throw new Error(`subflow "${id}" does not compile: ${compiled.errors.map((e) => e.code + ' ' + e.message).join('; ')}`);
-    const sub = new GraphRun(compiled.graph!, [...this.scope, { loop: cn.id, iteration: 0 }], this.ctx, inputs);
+    const scope = [...this.scope, { loop: cn.id, iteration: 0 }];
+    // 把子流程「當下」的結構快照進事件流：歷史回放時即使來源 workflow 之後被改，也能畫出當時跑的圖
+    this.ctx.emitEvent('subflow_started', { node_id: cn.id, key: this.key(cn.id), scope, data: { workflow_id: id, workflow: source, inputs } });
+    const sub = new GraphRun(compiled.graph!, scope, this.ctx, inputs);
     await sub.run();
     const status = sub.endStatus ?? (sub.unhandledFailures.length ? 'failed' : 'success');
     const outputs = Object.fromEntries(Object.keys(cn.outputs).map((k) => [k, sub.endOutputs?.[k]]));

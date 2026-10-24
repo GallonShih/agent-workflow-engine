@@ -1,0 +1,573 @@
+{
+  "id": "nested-review",
+  "name": "巢狀示範：subflow 拆解任務 → 外層 review 2 輪 × 內層 coding⇄testing 迴圈",
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "ports": {
+        "outputs": {
+          "request": {
+            "type": "string"
+          },
+          "repository": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "id": "plan",
+      "type": "subflow",
+      "label": "子流程：plan-subflow",
+      "config": {
+        "workflow": "plan-subflow"
+      },
+      "ports": {
+        "inputs": {
+          "request": {
+            "type": "string"
+          },
+          "repository": {
+            "type": "string"
+          }
+        },
+        "outputs": {
+          "plan": {
+            "type": "string"
+          },
+          "tasks": {
+            "type": "array",
+            "items": {
+              "$type": "Task"
+            }
+          },
+          "acceptance_criteria": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "review_rounds",
+      "type": "loop",
+      "label": "外層：Review Rounds（2 輪）",
+      "ports": {
+        "inputs": {
+          "tasks": {
+            "type": "array",
+            "items": {
+              "$type": "Task"
+            }
+          },
+          "acceptance_criteria": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "outputs": {
+          "passed": {
+            "type": "boolean"
+          },
+          "report": {
+            "type": "string"
+          },
+          "inner_iterations": {
+            "type": "integer"
+          }
+        }
+      },
+      "config": {
+        "max_iterations": 2
+      },
+      "body": {
+        "nodes": [
+          {
+            "id": "loop_in",
+            "type": "loop_in"
+          },
+          {
+            "id": "fix_loop",
+            "type": "loop",
+            "label": "內層：Coding ⇄ Testing",
+            "ports": {
+              "inputs": {
+                "tasks": {
+                  "type": "array",
+                  "items": {
+                    "$type": "Task"
+                  }
+                },
+                "acceptance_criteria": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "feedback": {
+                  "schema": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "required": false,
+                  "default": []
+                }
+              },
+              "outputs": {
+                "passed": {
+                  "type": "boolean"
+                },
+                "failures": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "summary": {
+                  "type": "string"
+                },
+                "files_modified": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "report": {
+                  "type": "string"
+                }
+              }
+            },
+            "config": {
+              "max_iterations": 3,
+              "until": {
+                "port": "passed",
+                "op": "eq",
+                "value": true
+              },
+              "carry": [
+                {
+                  "from": "failures",
+                  "to": "feedback"
+                }
+              ]
+            },
+            "body": {
+              "nodes": [
+                {
+                  "id": "loop_in",
+                  "type": "loop_in"
+                },
+                {
+                  "id": "coder",
+                  "type": "coding_agent",
+                  "label": "Coding Agent"
+                },
+                {
+                  "id": "tester",
+                  "type": "testing_agent",
+                  "label": "Testing Agent"
+                },
+                {
+                  "id": "loop_out",
+                  "type": "loop_out"
+                }
+              ],
+              "edges": [
+                {
+                  "kind": "control",
+                  "from": {
+                    "node": "loop_in",
+                    "port": "success"
+                  },
+                  "to": {
+                    "node": "coder",
+                    "port": "execute"
+                  }
+                },
+                {
+                  "kind": "control",
+                  "from": {
+                    "node": "coder",
+                    "port": "success"
+                  },
+                  "to": {
+                    "node": "tester",
+                    "port": "execute"
+                  }
+                },
+                {
+                  "kind": "control",
+                  "from": {
+                    "node": "tester",
+                    "port": "success"
+                  },
+                  "to": {
+                    "node": "loop_out",
+                    "port": "execute"
+                  }
+                },
+                {
+                  "kind": "data",
+                  "from": {
+                    "node": "loop_in",
+                    "port": "tasks"
+                  },
+                  "to": {
+                    "node": "coder",
+                    "port": "tasks"
+                  }
+                },
+                {
+                  "kind": "data",
+                  "from": {
+                    "node": "loop_in",
+                    "port": "feedback"
+                  },
+                  "to": {
+                    "node": "coder",
+                    "port": "feedback"
+                  }
+                },
+                {
+                  "kind": "data",
+                  "from": {
+                    "node": "loop_in",
+                    "port": "acceptance_criteria"
+                  },
+                  "to": {
+                    "node": "tester",
+                    "port": "acceptance_criteria"
+                  }
+                },
+                {
+                  "kind": "data",
+                  "from": {
+                    "node": "coder",
+                    "port": "files_modified"
+                  },
+                  "to": {
+                    "node": "tester",
+                    "port": "files_modified"
+                  }
+                },
+                {
+                  "kind": "data",
+                  "from": {
+                    "node": "coder",
+                    "port": "files_modified"
+                  },
+                  "to": {
+                    "node": "loop_out",
+                    "port": "files_modified"
+                  }
+                },
+                {
+                  "kind": "data",
+                  "from": {
+                    "node": "coder",
+                    "port": "summary"
+                  },
+                  "to": {
+                    "node": "loop_out",
+                    "port": "summary"
+                  }
+                },
+                {
+                  "kind": "data",
+                  "from": {
+                    "node": "tester",
+                    "port": "passed"
+                  },
+                  "to": {
+                    "node": "loop_out",
+                    "port": "passed"
+                  }
+                },
+                {
+                  "kind": "data",
+                  "from": {
+                    "node": "tester",
+                    "port": "failures"
+                  },
+                  "to": {
+                    "node": "loop_out",
+                    "port": "failures"
+                  }
+                },
+                {
+                  "kind": "data",
+                  "from": {
+                    "node": "tester",
+                    "port": "report"
+                  },
+                  "to": {
+                    "node": "loop_out",
+                    "port": "report"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "id": "note",
+            "type": "log",
+            "label": "記錄本輪結果",
+            "config": {
+              "level": "info"
+            }
+          },
+          {
+            "id": "loop_out",
+            "type": "loop_out"
+          }
+        ],
+        "edges": [
+          {
+            "kind": "control",
+            "from": {
+              "node": "loop_in",
+              "port": "success"
+            },
+            "to": {
+              "node": "fix_loop",
+              "port": "execute"
+            }
+          },
+          {
+            "kind": "data",
+            "from": {
+              "node": "loop_in",
+              "port": "tasks"
+            },
+            "to": {
+              "node": "fix_loop",
+              "port": "tasks"
+            }
+          },
+          {
+            "kind": "data",
+            "from": {
+              "node": "loop_in",
+              "port": "acceptance_criteria"
+            },
+            "to": {
+              "node": "fix_loop",
+              "port": "acceptance_criteria"
+            }
+          },
+          {
+            "kind": "control",
+            "from": {
+              "node": "fix_loop",
+              "port": "completed"
+            },
+            "to": {
+              "node": "note",
+              "port": "execute"
+            }
+          },
+          {
+            "kind": "data",
+            "from": {
+              "node": "fix_loop",
+              "port": "report"
+            },
+            "to": {
+              "node": "note",
+              "port": "message"
+            }
+          },
+          {
+            "kind": "control",
+            "from": {
+              "node": "note",
+              "port": "success"
+            },
+            "to": {
+              "node": "loop_out",
+              "port": "execute"
+            }
+          },
+          {
+            "kind": "data",
+            "from": {
+              "node": "fix_loop",
+              "port": "passed"
+            },
+            "to": {
+              "node": "loop_out",
+              "port": "passed"
+            }
+          },
+          {
+            "kind": "data",
+            "from": {
+              "node": "fix_loop",
+              "port": "report"
+            },
+            "to": {
+              "node": "loop_out",
+              "port": "report"
+            }
+          },
+          {
+            "kind": "data",
+            "from": {
+              "node": "fix_loop",
+              "port": "iterations"
+            },
+            "to": {
+              "node": "loop_out",
+              "port": "inner_iterations"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "end_ok",
+      "type": "end",
+      "label": "SUCCESS",
+      "config": {
+        "status": "success"
+      },
+      "ports": {
+        "inputs": {
+          "report": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "id": "end_fail",
+      "type": "end",
+      "label": "FAILED",
+      "config": {
+        "status": "failed"
+      },
+      "ports": {
+        "inputs": {}
+      }
+    }
+  ],
+  "edges": [
+    {
+      "kind": "control",
+      "from": {
+        "node": "start",
+        "port": "success"
+      },
+      "to": {
+        "node": "plan",
+        "port": "execute"
+      }
+    },
+    {
+      "kind": "data",
+      "from": {
+        "node": "start",
+        "port": "request"
+      },
+      "to": {
+        "node": "plan",
+        "port": "request"
+      }
+    },
+    {
+      "kind": "data",
+      "from": {
+        "node": "start",
+        "port": "repository"
+      },
+      "to": {
+        "node": "plan",
+        "port": "repository"
+      }
+    },
+    {
+      "kind": "control",
+      "from": {
+        "node": "plan",
+        "port": "success"
+      },
+      "to": {
+        "node": "review_rounds",
+        "port": "execute"
+      }
+    },
+    {
+      "kind": "control",
+      "from": {
+        "node": "plan",
+        "port": "failure"
+      },
+      "to": {
+        "node": "end_fail",
+        "port": "execute"
+      }
+    },
+    {
+      "kind": "data",
+      "from": {
+        "node": "plan",
+        "port": "tasks"
+      },
+      "to": {
+        "node": "review_rounds",
+        "port": "tasks"
+      }
+    },
+    {
+      "kind": "data",
+      "from": {
+        "node": "plan",
+        "port": "acceptance_criteria"
+      },
+      "to": {
+        "node": "review_rounds",
+        "port": "acceptance_criteria"
+      }
+    },
+    {
+      "kind": "control",
+      "from": {
+        "node": "review_rounds",
+        "port": "completed"
+      },
+      "to": {
+        "node": "end_ok",
+        "port": "execute"
+      }
+    },
+    {
+      "kind": "control",
+      "from": {
+        "node": "review_rounds",
+        "port": "failure"
+      },
+      "to": {
+        "node": "end_fail",
+        "port": "execute"
+      }
+    },
+    {
+      "kind": "data",
+      "from": {
+        "node": "review_rounds",
+        "port": "report"
+      },
+      "to": {
+        "node": "end_ok",
+        "port": "report"
+      }
+    }
+  ]
+}

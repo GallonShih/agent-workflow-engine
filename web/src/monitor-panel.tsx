@@ -1,7 +1,7 @@
-import type { AgentEvent, NodeDefinition } from '../../src/types.js';
+import type { AgentEvent, NodeDefinition, Scope } from '../../src/types.js';
 import type { RunMeta } from './api.js';
 import { STATUS_COLOR } from './editor.js';
-import { recordsForNode, type RecView, type RunView } from './monitor.js';
+import { iterationsOf, recordsForNode, scopeKeyOf, type RecView, type RunView } from './monitor.js';
 
 const section: React.CSSProperties = { borderTop: '1px solid #e2e8f0', padding: '8px 12px' };
 const h: React.CSSProperties = { margin: '0 0 6px', fontSize: 12, textTransform: 'uppercase', letterSpacing: '.04em', color: '#64748b' };
@@ -86,51 +86,56 @@ function RecordDetail({ r }: { r: RecView }) {
 
 export function NodeRunPanel(props: {
   run: RunView;
-  view: string;
+  /** 目前畫布所在的 scope（已解析好每層 iteration） */
+  scope: Scope;
   nodeId: string;
   def?: NodeDefinition;
-  iteration: number | null;
+  /** 切換最內層的 iteration */
   onIteration: (i: number) => void;
+  /** composite / subflow 的某一輪 → drill-in 到畫布 */
   onOpenIteration?: (i: number) => void;
 }) {
-  const { run, view, nodeId } = props;
-  const recs = recordsForNode(run, view, nodeId);
+  const { run, scope, nodeId } = props;
+  const recs = recordsForNode(run, scope, nodeId);
   const composite = props.def && ['loop', 'foreach', 'subflow'].includes(props.def.name);
-  const iters = run.iterations[nodeId] ?? [];
+  const iters = iterationsOf(run, scope, nodeId);
   if (run.status === 'idle') return <div style={{ padding: 12, color: '#64748b' }}>尚未執行。按上方「▶ 執行」，或從左側「執行紀錄」開啟一次歷史 run。</div>;
-  const current = view ? recs.find((r) => r.iteration === props.iteration) ?? recs[recs.length - 1] : recs[0];
+  const here = scope.length ? scope[scope.length - 1] : undefined;
+  const current = here ? recs.find((r) => r.iteration === here.iteration) : recs[0];
+  const where = scope.length ? scope.map((s) => `${s.loop}#${s.iteration}`).join(' › ') : '主流程';
   return (
     <div style={{ fontSize: 12 }} data-testid="node-run-panel">
-      {view && (
+      {here && (
         <div style={section}>
-          <div style={h}>Iteration（{view}）</div>
+          <div style={h}>Iteration（{here.loop}{scope.length > 1 ? `，外層 ${scope.slice(0, -1).map((s) => `${s.loop}#${s.iteration}`).join(' › ')}` : ''}）</div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }} data-testid="iteration-selector">
             {recs.map((r) => (
               <button key={r.key} data-iteration={r.iteration} onClick={() => props.onIteration(r.iteration ?? 0)}
-                style={{ border: `2px solid ${STATUS_COLOR[r.status] ?? '#94a3b8'}`, background: r.iteration === current?.iteration ? '#fef9c3' : '#fff', borderRadius: 6, padding: '2px 8px', cursor: 'pointer' }}>
+                style={{ border: `2px solid ${STATUS_COLOR[r.status] ?? '#94a3b8'}`, background: r.iteration === here.iteration ? '#fef9c3' : '#fff', borderRadius: 6, padding: '2px 8px', cursor: 'pointer' }}>
                 #{r.iteration} {r.status}
               </button>
             ))}
-            {!recs.length && <span style={{ color: '#94a3b8' }}>此節點在這次 run 中沒有紀錄</span>}
+            {!recs.length && <span style={{ color: '#94a3b8' }}>此節點在這個外層輪次中沒有紀錄</span>}
           </div>
         </div>
       )}
       <div style={section}>
-        <div style={h}>節點執行結果 · {nodeId}</div>
+        <div style={h}>節點執行結果 · {nodeId} <span style={{ color: '#64748b', fontWeight: 400 }}>@ {where}</span></div>
         {current ? <RecordDetail r={current} /> : <div style={{ color: '#94a3b8' }}>沒有紀錄（可能尚未觸發）</div>}
       </div>
       {composite && iters.length > 0 && (
         <div style={section}>
-          <div style={h}>每一輪（{iters.length}）</div>
+          <div style={h}>{props.def?.name === 'subflow' ? '子流程執行' : `每一輪（${iters.length}）`}</div>
           {iters.map((i) => {
-            const inner = [...run.records.values()].filter((r) => r.scopeKey === `${nodeId}#${i}`);
+            const sk = scopeKeyOf([...scope, { loop: nodeId, iteration: i }]);
+            const inner = [...run.records.values()].filter((r) => r.scopeKey === sk);
             const failed = inner.some((r) => r.status === 'failed' && !r.handled);
             const running = inner.some((r) => r.status === 'running');
             return (
               <div key={i} style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 3 }}>
                 <Badge status={running ? 'running' : failed ? 'failed' : 'success'} />
-                <span>iteration #{i} · {inner.length} 個節點紀錄</span>
-                {props.onOpenIteration && <button onClick={() => props.onOpenIteration!(i)}>在畫布檢視</button>}
+                <span>{props.def?.name === 'subflow' ? '子流程' : `iteration #${i}`} · {inner.length} 個節點紀錄</span>
+                {props.onOpenIteration && <button data-open-iteration={i} onClick={() => props.onOpenIteration!(i)}>在畫布檢視</button>}
               </div>
             );
           })}

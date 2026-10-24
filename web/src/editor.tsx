@@ -1,5 +1,5 @@
 import { createRoot } from 'react-dom/client';
-import { css } from 'styled-components';
+import { css, StyleSheetManager } from 'styled-components';
 import { ClassicPreset, NodeEditor, type GetSchemes } from 'rete';
 import { AreaExtensions, AreaPlugin } from 'rete-area-plugin';
 import { ConnectionPlugin, Presets as ConnectionPresets } from 'rete-connection-plugin';
@@ -23,6 +23,8 @@ export class UINode extends ClassicPreset.Node {
   status?: NodeStatus;
   errors = 0;
   picked = false;
+  /** 邊界節點（loop_in / loop_out / 子流程的 start / end）：畫成不同底色，port 標籤附上外層對應 */
+  boundary?: string;
   constructor(public wf: WorkflowNode, title: string) {
     super(title);
     this.id = wf.id;
@@ -40,6 +42,12 @@ export const STATUS_COLOR: Record<string, string> = {
   skipped: '#cbd5e1',
 };
 
+/**
+ * styled-components v6 預設會把未知 prop 轉給 DOM；classic preset 的 `styles` 是函式 prop，
+ * 會被轉到 <div> 上而觸發 React 警告。這裡只擋掉 `styles`（其餘照舊）。
+ */
+const shouldForwardProp = (prop: string, target: unknown) => typeof target !== 'string' || prop !== 'styles';
+
 function StatusNode(props: { data: UINode; emit: never; styles?: () => unknown }) {
   const n = props.data;
   const s = n.status;
@@ -56,15 +64,23 @@ function StatusNode(props: { data: UINode; emit: never; styles?: () => unknown }
           {s}
         </div>
       )}
+      {n.boundary && (
+        <div style={{ position: 'absolute', top: -11, right: 14, zIndex: 2, background: '#7c3aed', color: '#fff', borderRadius: 8, padding: '1px 8px', fontSize: 11, fontWeight: 600 }}>
+          {n.boundary}
+        </div>
+      )}
+      <StyleSheetManager shouldForwardProp={shouldForwardProp}>
       <ClassicNode
         {...(props as unknown as Record<string, unknown>)}
         styles={() => css`
+          ${n.boundary ? 'background: #4c1d95; border-style: dashed;' : ''}
           ${n.picked ? 'box-shadow: 0 0 0 4px #fde047;' : ''}
           ${s ? `border: 4px solid ${STATUS_COLOR[s]};` : n.errors ? 'border: 3px solid #dc2626;' : ''}
           ${s === 'skipped' ? 'opacity: .5;' : ''}
           ${s === 'running' ? 'animation: pulse 1s infinite;' : ''}
         `}
       />
+      </StyleSheetManager>
     </div>
   );
 }
@@ -95,8 +111,19 @@ function ConnectionView(props: { data: Conn }) {
   );
 }
 
+export interface LoadOptions {
+  /** 目前 body 的 loop_in / loop_out ports */
+  body?: BodyPorts;
+  /** 唯讀（subflow drill-in）：禁止新增 / 刪除連線與節點 */
+  readOnly?: boolean;
+  /** 邊界節點 port 註解：{ nodeId: { 'd:port': '← planner.tasks' } } */
+  annotations?: Record<string, Record<string, string>>;
+  /** 邊界節點的徽章文字：{ nodeId: '輸入邊界' } */
+  boundaries?: Record<string, string>;
+}
+
 export interface EditorApi {
-  load(graph: WorkflowGraph, body?: BodyPorts): Promise<void>;
+  load(graph: WorkflowGraph, opts?: LoadOptions): Promise<void>;
   exportGraph(): WorkflowGraph;
   addNode(type: string): Promise<WorkflowNode | undefined>;
   /** 屬性面板改了 label / config / ports：重建該節點的 ports，保留位置與仍有效的連線 */
@@ -115,6 +142,8 @@ export interface EditorEvents {
   onSelect: (id: string | null) => void;
   /** 圖結構變了（連線新增 / 刪除、節點新增 / 刪除）→ 重新驗證 */
   onChange: () => void;
+  /** 雙擊節點（loop / foreach / subflow → drill-in） */
+  onOpen?: (id: string) => void;
 }
 
 export async function createEditor(container: HTMLElement, registry: NodeRegistry, ev: EditorEvents): Promise<EditorApi> {
@@ -124,6 +153,7 @@ export async function createEditor(container: HTMLElement, registry: NodeRegistr
   const render = new ReactPlugin<Schemes, AreaExtra>({ createRoot });
   const arrange = new AutoArrangePlugin<Schemes>();
   let bodyPorts: BodyPorts | undefined;
+  let opts: LoadOptions = {};
   let loading = false;
   let selected: string | null = null;
 
@@ -147,6 +177,10 @@ export async function createEditor(container: HTMLElement, registry: NodeRegistr
 
   // 連線檢查：與後端 compiler 共用 TypedSocket.isCompatibleWith（JSON Schema 結構相容）
   editor.addPipe((context) => {
+    if (opts.readOnly && !loading && ['connectioncreate', 'connectionremove', 'noderemove', 'nodecreate'].includes(context.type)) {
+      if (context.type === 'connectioncreate') ev.log('唯讀畫面（sub-workflow）：不能修改。請按「開啟來源 workflow 編輯」。', 'error');
+      return;
+    }
     if (context.type === 'connectioncreate') {
       const c = context.data;
       const src = editor.getNode(c.source)?.outputs[c.sourceOutput]?.socket;
@@ -161,8 +195,21 @@ export async function createEditor(container: HTMLElement, registry: NodeRegistr
     return context;
   });
 
+  // 雙擊偵測：節點被 pick 時 simpleNodesOrder 會把 DOM 移到最上層，瀏覽器原生 dblclick 因此不會觸發，
+  // 改成「同一節點 350ms 內被 pick 兩次」= 雙擊（用來 drill-in）
+  let lastPick = { id: '', t: 0 };
   area.addPipe((context) => {
-    if (context.type === 'nodepicked') api.select(context.data.id);
+    if (context.type === 'nodepicked') {
+      const id = context.data.id;
+      const now = performance.now();
+      if (lastPick.id === id && now - lastPick.t < 350) {
+        lastPick = { id: '', t: 0 };
+        queueMicrotask(() => ev.onOpen?.(id));
+      } else lastPick = { id, t: now };
+      api.select(id);
+    }
+    // 不要讓 area 預設的「雙擊放大」干擾
+    if (context.type === 'zoom' && context.data.source === 'dblclick') return;
     return context;
   });
   container.addEventListener('pointerdown', (e) => {
@@ -179,16 +226,21 @@ export async function createEditor(container: HTMLElement, registry: NodeRegistr
       ev.log(`${wf.id}: ${(e as Error).message}`, 'error');
       ports = { inputs: def.inputs, outputs: def.outputs, controlInputs: def.control_inputs, controlOutputs: def.control_outputs };
     }
-    const node = new UINode(wf, `${wf.label || wf.id}  ·  ${wf.type}`);
+    const drill = ['loop', 'foreach', 'subflow'].includes(wf.type) ? '  ⤵' : '';
+    const node = new UINode(wf, `${wf.label || wf.id}  ·  ${wf.type}${drill}`);
+    const ann = opts.annotations?.[wf.id] ?? {};
+    const note = (k: string) => (ann[k] ? `  ${ann[k]}` : '');
+    node.boundary = opts.boundaries?.[wf.id];
     for (const c of ports.controlInputs) node.addInput(`c:${c}`, new ClassicPreset.Input(controlSocket, `▶ ${c}`, true));
     for (const [k, p] of Object.entries(ports.inputs)) {
       const req = p.required !== false && p.default === undefined && !(wf.inputs && k in wf.inputs) ? '*' : '';
-      node.addInput(`d:${k}`, new ClassicPreset.Input(new TypedSocket(p.schema), `${k}${req}: ${typeLabel(p.schema)}`, !!p.multiple));
+      node.addInput(`d:${k}`, new ClassicPreset.Input(new TypedSocket(p.schema), `${k}${req}: ${typeLabel(p.schema)}${note(`d:${k}`)}`, !!p.multiple));
     }
     for (const c of ports.controlOutputs) node.addOutput(`c:${c}`, new ClassicPreset.Output(controlSocket, `${c} ▶`));
-    for (const [k, p] of Object.entries(ports.outputs)) node.addOutput(`d:${k}`, new ClassicPreset.Output(new TypedSocket(p.schema), `${k}: ${typeLabel(p.schema)}`));
+    for (const [k, p] of Object.entries(ports.outputs)) node.addOutput(`d:${k}`, new ClassicPreset.Output(new TypedSocket(p.schema), `${k}: ${typeLabel(p.schema)}${note(`d:${k}`)}`));
     const rows = Object.keys(node.inputs).length + Object.keys(node.outputs).length;
     node.height = 90 + rows * 44;
+    if (Object.keys(ann).length) node.width = 420;
     return node;
   }
 
@@ -217,10 +269,11 @@ export async function createEditor(container: HTMLElement, registry: NodeRegistr
   }
 
   const api: EditorApi = {
-    async load(graph, body) {
+    async load(graph, o = {}) {
       loading = true;
       try {
-        bodyPorts = body;
+        opts = o;
+        bodyPorts = o.body;
         selected = null;
         await clear();
         for (const wf of graph.nodes) await editor.addNode(buildNode(wf));
@@ -241,6 +294,7 @@ export async function createEditor(container: HTMLElement, registry: NodeRegistr
       return { nodes, edges: exportEdges() };
     },
     async addNode(type) {
+      if (opts.readOnly) return;
       const def = registry.get(type);
       if (!def) return;
       let i = 1;

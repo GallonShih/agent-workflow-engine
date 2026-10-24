@@ -255,7 +255,7 @@ export function PropertiesPanel(props: {
       )}
 
       <div style={{ ...section, display: 'flex', gap: 6 }}>
-        {props.onOpenBody && <button onClick={props.onOpenBody}>開啟 body 子圖</button>}
+        {props.onOpenBody && <button data-testid="open-body" onClick={props.onOpenBody}>進入子圖（或雙擊節點）</button>}
         {!['loop_in', 'loop_out'].includes(node.type) && <button style={{ color: '#b91c1c' }} onClick={props.onDelete}>刪除節點</button>}
       </div>
     </div>

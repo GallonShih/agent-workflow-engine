@@ -9,7 +9,7 @@ import { runWorkflow } from '../engine.js';
 import { makeRuntimeSelector, resolveRuntimeMode } from '../runtime/select.js';
 import type { AgentRuntime } from '../runtime/types.js';
 import { demoRuntime } from '../demo/scenario.js';
-import { nodeServices } from '../services-node.js';
+import { createWorkflowLoader, nodeServices } from '../services-node.js';
 import type { RunServices } from '../services.js';
 import { resumeResultsFromEvents } from '../resume.js';
 import { RunStore, type RunMeta } from './run-store.js';
@@ -26,6 +26,8 @@ export interface ServerOptions {
   /** 前端 build（web/dist），存在時由 server 一併提供 */
   staticDir?: string;
   logger?: boolean;
+  /** 存放 workflow JSON 的資料夾（預設 <root>/workflows；subflow 也從這裡載入） */
+  workflowsDir?: string;
 }
 
 interface ActiveRun {
@@ -51,9 +53,9 @@ const MIME: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js
 export function buildServer(opts: ServerOptions): FastifyInstance & { runs: Map<string, ActiveRun> } {
   const root = opts.root;
   const registry = opts.registry ?? loadRegistry(path.join(root, 'registry/builtin'), path.join(root, 'registry/agents'));
-  const services = opts.services ?? nodeServices({ root, registry });
+  const workflowsDir = opts.workflowsDir ?? path.join(root, 'workflows');
+  const services = opts.services ?? { ...nodeServices({ root, registry }), loadWorkflow: createWorkflowLoader(workflowsDir) };
   const store = new RunStore(opts.runsDir ?? path.join(root, '.runs'));
-  const workflowsDir = path.join(root, 'workflows');
   const runs = new Map<string, ActiveRun>();
   const activeIds = () => new Set([...runs.values()].filter((r) => r.meta.status === 'running').map((r) => r.meta.run_id));
   const app = Fastify({ logger: opts.logger ?? false, bodyLimit: 5 * 1024 * 1024 }) as unknown as FastifyInstance & { runs: Map<string, ActiveRun> };
@@ -139,6 +141,21 @@ export function buildServer(opts: ServerOptions): FastifyInstance & { runs: Map<
   app.get<{ Params: { id: string } }>('/api/workflows/:id', async (req, reply) => {
     const wf = readWorkflow(req.params.id);
     return wf ?? reply.code(404).send({ error: 'workflow not found' });
+  });
+
+  /**
+   * 存回 workflows/<id>.json（例如從 subflow drill-in 按「開啟來源 workflow 編輯」後存檔）。
+   * 有驗證錯誤就拒絕（422）：這份 workflow 可能被其他 workflow 以 subflow 引用，不能存成跑不動的版本。
+   */
+  app.put<{ Params: { id: string }; Body: WorkflowGraph }>('/api/workflows/:id', async (req, reply) => {
+    const id = req.params.id;
+    if (!/^[A-Za-z0-9_-]+$/.test(id)) return reply.code(400).send({ error: 'invalid workflow id' });
+    const wf = req.body;
+    if (!wf || !Array.isArray(wf.nodes) || !Array.isArray(wf.edges)) return reply.code(400).send({ error: 'body must be a workflow { nodes, edges }' });
+    const r = compileWorkflow(wf, registry);
+    if (!r.ok) return reply.code(422).send({ error: 'workflow has validation errors', errors: r.errors, warnings: r.warnings });
+    fs.writeFileSync(path.join(workflowsDir, `${id}.json`), JSON.stringify({ ...wf, id }, null, 2) + '\n');
+    return { ok: true, id, warnings: r.warnings };
   });
 
   app.post<{ Body: { workflow?: WorkflowGraph } }>('/api/validate', async (req, reply) => {
