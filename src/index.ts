@@ -10,3 +10,6 @@ export * from './runtime/types.js';
 export * from './runtime/mock.js';
 export * from './runtime/claude.js';
 export * from './runtime/select.js';
+export * from './dsl.js';
+export { convertToV1, type ConvertResult } from './convert.js';
+export { createMcpServer, TOOLS as MCP_TOOLS } from './mcp/server.js';

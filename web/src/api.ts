@@ -33,13 +33,14 @@ export const backend = {
       return null;
     }
   },
-  validate: (workflow: WorkflowGraph) =>
-    fetch('/api/validate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ workflow }) }).then((r) => j<{ ok: boolean; errors: Diagnostic[]; warnings: Diagnostic[] }>(r)),
-  startRun: (body: { workflow: WorkflowGraph; scenario?: string; mock_delay_ms?: number; inputs?: Record<string, unknown> }) =>
+  validate: (workflow: WorkflowGraph, advanced = false) =>
+    fetch('/api/validate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ workflow, advanced }) }).then((r) => j<{ ok: boolean; errors: Diagnostic[]; warnings: Diagnostic[] }>(r)),
+  startRun: (body: { workflow: WorkflowGraph | Record<string, unknown>; scenario?: string; mock_delay_ms?: number; inputs?: Record<string, unknown>; advanced?: boolean }) =>
     fetch('/api/runs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then((r) => j<{ run_id: string }>(r)),
   listRuns: () => fetch('/api/runs').then((r) => j<RunMeta[]>(r)),
   getRun: (id: string) => fetch(`/api/runs/${id}`).then((r) => j<{ meta: RunMeta; workflow?: WorkflowGraph; records?: NodeRunRecord[]; events: RunEvent[] }>(r)),
   cancel: (id: string) => fetch(`/api/runs/${id}/cancel`, { method: 'POST' }).then((r) => j<{ ok: boolean }>(r)),
+  /** 進階功能 */
   resume: (id: string, body: Record<string, unknown> = {}) =>
     fetch(`/api/runs/${id}/resume`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then((r) => j<{ run_id: string }>(r)),
   /** SSE：回傳關閉函式 */

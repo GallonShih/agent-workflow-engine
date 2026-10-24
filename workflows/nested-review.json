@@ -1,4 +1,5 @@
 {
+  "version": 1,
   "id": "nested-review",
   "name": "巢狀示範：subflow 拆解任務 → 外層 review 2 輪 × 內層 coding⇄testing 迴圈",
   "nodes": [
@@ -141,6 +142,12 @@
                 },
                 "report": {
                   "type": "string"
+                },
+                "feedback": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
                 }
               }
             },
@@ -150,13 +157,7 @@
                 "port": "passed",
                 "op": "eq",
                 "value": true
-              },
-              "carry": [
-                {
-                  "from": "failures",
-                  "to": "feedback"
-                }
-              ]
+              }
             },
             "body": {
               "nodes": [
@@ -180,138 +181,16 @@
                 }
               ],
               "edges": [
-                {
-                  "kind": "control",
-                  "from": {
-                    "node": "loop_in",
-                    "port": "success"
-                  },
-                  "to": {
-                    "node": "coder",
-                    "port": "execute"
-                  }
-                },
-                {
-                  "kind": "control",
-                  "from": {
-                    "node": "coder",
-                    "port": "success"
-                  },
-                  "to": {
-                    "node": "tester",
-                    "port": "execute"
-                  }
-                },
-                {
-                  "kind": "control",
-                  "from": {
-                    "node": "tester",
-                    "port": "success"
-                  },
-                  "to": {
-                    "node": "loop_out",
-                    "port": "execute"
-                  }
-                },
-                {
-                  "kind": "data",
-                  "from": {
-                    "node": "loop_in",
-                    "port": "tasks"
-                  },
-                  "to": {
-                    "node": "coder",
-                    "port": "tasks"
-                  }
-                },
-                {
-                  "kind": "data",
-                  "from": {
-                    "node": "loop_in",
-                    "port": "feedback"
-                  },
-                  "to": {
-                    "node": "coder",
-                    "port": "feedback"
-                  }
-                },
-                {
-                  "kind": "data",
-                  "from": {
-                    "node": "loop_in",
-                    "port": "acceptance_criteria"
-                  },
-                  "to": {
-                    "node": "tester",
-                    "port": "acceptance_criteria"
-                  }
-                },
-                {
-                  "kind": "data",
-                  "from": {
-                    "node": "coder",
-                    "port": "files_modified"
-                  },
-                  "to": {
-                    "node": "tester",
-                    "port": "files_modified"
-                  }
-                },
-                {
-                  "kind": "data",
-                  "from": {
-                    "node": "coder",
-                    "port": "files_modified"
-                  },
-                  "to": {
-                    "node": "loop_out",
-                    "port": "files_modified"
-                  }
-                },
-                {
-                  "kind": "data",
-                  "from": {
-                    "node": "coder",
-                    "port": "summary"
-                  },
-                  "to": {
-                    "node": "loop_out",
-                    "port": "summary"
-                  }
-                },
-                {
-                  "kind": "data",
-                  "from": {
-                    "node": "tester",
-                    "port": "passed"
-                  },
-                  "to": {
-                    "node": "loop_out",
-                    "port": "passed"
-                  }
-                },
-                {
-                  "kind": "data",
-                  "from": {
-                    "node": "tester",
-                    "port": "failures"
-                  },
-                  "to": {
-                    "node": "loop_out",
-                    "port": "failures"
-                  }
-                },
-                {
-                  "kind": "data",
-                  "from": {
-                    "node": "tester",
-                    "port": "report"
-                  },
-                  "to": {
-                    "node": "loop_out",
-                    "port": "report"
-                  }
-                }
+                "loop_in.tasks -> coder.tasks",
+                "loop_in.feedback -> coder.feedback",
+                "loop_in.acceptance_criteria -> tester.acceptance_criteria",
+                "coder.files_modified -> tester.files_modified",
+                "coder.files_modified -> loop_out.files_modified",
+                "coder.summary -> loop_out.summary",
+                "tester.passed -> loop_out.passed",
+                "tester.failures -> loop_out.failures",
+                "tester.report -> loop_out.report",
+                "tester.failures -> loop_out.feedback"
               ]
             }
           },
@@ -329,105 +208,12 @@
           }
         ],
         "edges": [
-          {
-            "kind": "control",
-            "from": {
-              "node": "loop_in",
-              "port": "success"
-            },
-            "to": {
-              "node": "fix_loop",
-              "port": "execute"
-            }
-          },
-          {
-            "kind": "data",
-            "from": {
-              "node": "loop_in",
-              "port": "tasks"
-            },
-            "to": {
-              "node": "fix_loop",
-              "port": "tasks"
-            }
-          },
-          {
-            "kind": "data",
-            "from": {
-              "node": "loop_in",
-              "port": "acceptance_criteria"
-            },
-            "to": {
-              "node": "fix_loop",
-              "port": "acceptance_criteria"
-            }
-          },
-          {
-            "kind": "control",
-            "from": {
-              "node": "fix_loop",
-              "port": "completed"
-            },
-            "to": {
-              "node": "note",
-              "port": "execute"
-            }
-          },
-          {
-            "kind": "data",
-            "from": {
-              "node": "fix_loop",
-              "port": "report"
-            },
-            "to": {
-              "node": "note",
-              "port": "message"
-            }
-          },
-          {
-            "kind": "control",
-            "from": {
-              "node": "note",
-              "port": "success"
-            },
-            "to": {
-              "node": "loop_out",
-              "port": "execute"
-            }
-          },
-          {
-            "kind": "data",
-            "from": {
-              "node": "fix_loop",
-              "port": "passed"
-            },
-            "to": {
-              "node": "loop_out",
-              "port": "passed"
-            }
-          },
-          {
-            "kind": "data",
-            "from": {
-              "node": "fix_loop",
-              "port": "report"
-            },
-            "to": {
-              "node": "loop_out",
-              "port": "report"
-            }
-          },
-          {
-            "kind": "data",
-            "from": {
-              "node": "fix_loop",
-              "port": "iterations"
-            },
-            "to": {
-              "node": "loop_out",
-              "port": "inner_iterations"
-            }
-          }
+          "loop_in.tasks -> fix_loop.tasks",
+          "loop_in.acceptance_criteria -> fix_loop.acceptance_criteria",
+          "fix_loop.report -> note.message",
+          "fix_loop.passed -> loop_out.passed",
+          "fix_loop.report -> loop_out.report",
+          "fix_loop.iterations -> loop_out.inner_iterations"
         ]
       }
     },
@@ -445,129 +231,13 @@
           }
         }
       }
-    },
-    {
-      "id": "end_fail",
-      "type": "end",
-      "label": "FAILED",
-      "config": {
-        "status": "failed"
-      },
-      "ports": {
-        "inputs": {}
-      }
     }
   ],
   "edges": [
-    {
-      "kind": "control",
-      "from": {
-        "node": "start",
-        "port": "success"
-      },
-      "to": {
-        "node": "plan",
-        "port": "execute"
-      }
-    },
-    {
-      "kind": "data",
-      "from": {
-        "node": "start",
-        "port": "request"
-      },
-      "to": {
-        "node": "plan",
-        "port": "request"
-      }
-    },
-    {
-      "kind": "data",
-      "from": {
-        "node": "start",
-        "port": "repository"
-      },
-      "to": {
-        "node": "plan",
-        "port": "repository"
-      }
-    },
-    {
-      "kind": "control",
-      "from": {
-        "node": "plan",
-        "port": "success"
-      },
-      "to": {
-        "node": "review_rounds",
-        "port": "execute"
-      }
-    },
-    {
-      "kind": "control",
-      "from": {
-        "node": "plan",
-        "port": "failure"
-      },
-      "to": {
-        "node": "end_fail",
-        "port": "execute"
-      }
-    },
-    {
-      "kind": "data",
-      "from": {
-        "node": "plan",
-        "port": "tasks"
-      },
-      "to": {
-        "node": "review_rounds",
-        "port": "tasks"
-      }
-    },
-    {
-      "kind": "data",
-      "from": {
-        "node": "plan",
-        "port": "acceptance_criteria"
-      },
-      "to": {
-        "node": "review_rounds",
-        "port": "acceptance_criteria"
-      }
-    },
-    {
-      "kind": "control",
-      "from": {
-        "node": "review_rounds",
-        "port": "completed"
-      },
-      "to": {
-        "node": "end_ok",
-        "port": "execute"
-      }
-    },
-    {
-      "kind": "control",
-      "from": {
-        "node": "review_rounds",
-        "port": "failure"
-      },
-      "to": {
-        "node": "end_fail",
-        "port": "execute"
-      }
-    },
-    {
-      "kind": "data",
-      "from": {
-        "node": "review_rounds",
-        "port": "report"
-      },
-      "to": {
-        "node": "end_ok",
-        "port": "report"
-      }
-    }
+    "start.request -> plan.request",
+    "start.repository -> plan.repository",
+    "plan.tasks -> review_rounds.tasks",
+    "plan.acceptance_criteria -> review_rounds.acceptance_criteria",
+    "review_rounds.report -> end_ok.report"
   ]
 }

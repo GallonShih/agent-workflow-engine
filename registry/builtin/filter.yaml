@@ -1,5 +1,6 @@
 name: filter
 kind: builtin
+tier: advanced
 category: Data
 description: 對陣列每個元素套用 rule（可用 path 取欄位），輸出符合 / 不符合的元素
 inputs:

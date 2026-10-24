@@ -1,5 +1,6 @@
 name: template
 kind: builtin
+tier: v1
 category: Data
 mode: data
 description: 純資料節點（lazy pull）；用 {{inputs.port}} 組字串，輸入 ports 動態宣告

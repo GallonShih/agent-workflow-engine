@@ -1,5 +1,6 @@
 name: transform
 kind: builtin
+tier: v1
 category: Logic
 description: 用 JSONata 表達式轉換資料（安全的查詢 / 轉換語言，不執行任意程式碼）；$input 也可直接用欄位名稱
 inputs:

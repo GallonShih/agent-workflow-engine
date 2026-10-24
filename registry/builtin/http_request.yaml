@@ -1,5 +1,6 @@
 name: http_request
 kind: builtin
+tier: v1
 category: Utility
 description: 呼叫 HTTP API（只允許 http/https，有逾時）；URL 可用 {{inputs.x}}；非 2xx 走 failure（fail_on_http_error = false 時照樣 success）
 inputs:

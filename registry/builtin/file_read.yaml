@@ -1,5 +1,6 @@
 name: file_read
 kind: builtin
+tier: advanced
 category: IO
 description: 讀取沙盒工作目錄（預設 .workspace/）內的檔案；不允許絕對路徑、.. 或 symlink 逃出沙盒
 inputs:

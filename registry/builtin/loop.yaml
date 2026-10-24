@@ -1,7 +1,8 @@
 name: loop
 kind: builtin
+tier: v1
 category: Logic
-description: Loop composite node；body 子圖每一輪用全新的 Rete editor/engine 與 iteration scope 執行
+description: 重試迴圈（retry-until）：body 子圖每一輪用全新的 scope 執行，直到 until 成立或達 max_iterations。v1：與輸入同名的輸出（例如 feedback）自動帶到下一輪；輸出 done 表示 until 是否成立。carry / on_body_failure 屬 advanced。
 dynamic_ports: true
 control_inputs: [execute]
 control_outputs: [completed, done, exhausted, failure]

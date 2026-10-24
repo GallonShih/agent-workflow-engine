@@ -1,5 +1,6 @@
 name: start
 kind: builtin
+tier: v1
 category: Flow
 description: Workflow 入口；輸出 = 執行時傳入的 run inputs（ports.outputs 動態宣告）
 dynamic_ports: true

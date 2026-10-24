@@ -1,5 +1,6 @@
 name: join
 kind: builtin
+tier: advanced
 category: Logic
 description: 同步多條平行分支；policy = all（全部觸發才繼續，任一分支沒走到則 skipped）| any（至少一條）。config.inputs 可把 control 輸入展開成 in_1..in_N
 control_inputs: [in]

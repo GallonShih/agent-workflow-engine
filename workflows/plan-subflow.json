@@ -1,4 +1,5 @@
 {
+  "version": 1,
   "id": "plan-subflow",
   "name": "子流程：分析需求並拆解任務（給其他 workflow 以 subflow 引用）",
   "nodes": [
@@ -50,82 +51,10 @@
     }
   ],
   "edges": [
-    {
-      "kind": "control",
-      "from": {
-        "node": "start",
-        "port": "success"
-      },
-      "to": {
-        "node": "planner",
-        "port": "execute"
-      }
-    },
-    {
-      "kind": "data",
-      "from": {
-        "node": "start",
-        "port": "request"
-      },
-      "to": {
-        "node": "planner",
-        "port": "request"
-      }
-    },
-    {
-      "kind": "data",
-      "from": {
-        "node": "start",
-        "port": "repository"
-      },
-      "to": {
-        "node": "planner",
-        "port": "repository"
-      }
-    },
-    {
-      "kind": "control",
-      "from": {
-        "node": "planner",
-        "port": "success"
-      },
-      "to": {
-        "node": "end",
-        "port": "execute"
-      }
-    },
-    {
-      "kind": "data",
-      "from": {
-        "node": "planner",
-        "port": "plan"
-      },
-      "to": {
-        "node": "end",
-        "port": "plan"
-      }
-    },
-    {
-      "kind": "data",
-      "from": {
-        "node": "planner",
-        "port": "tasks"
-      },
-      "to": {
-        "node": "end",
-        "port": "tasks"
-      }
-    },
-    {
-      "kind": "data",
-      "from": {
-        "node": "planner",
-        "port": "acceptance_criteria"
-      },
-      "to": {
-        "node": "end",
-        "port": "acceptance_criteria"
-      }
-    }
+    "start.request -> planner.request",
+    "start.repository -> planner.repository",
+    "planner.plan -> end.plan",
+    "planner.tasks -> end.tasks",
+    "planner.acceptance_criteria -> end.acceptance_criteria"
   ]
 }

@@ -1,9 +1,11 @@
 name: condition
 kind: builtin
+tier: v1
 category: Logic
-description: 條件分支；config.rule 成立走 true，否則走 false
+description: 條件分支：對 value 套用 config.rule；成立時資料從 true 輸出、否則從 false 輸出（輸出的值 = data，沒接 data 就是 value）。沒走到那一側的下游節點會自動略過。
 inputs:
   value: {}
+  data: {schema: {}, required: false, description: 要往下傳的資料（省略時傳 value）}
 control_inputs: [execute]
 control_outputs: ["true", "false"]
 config_schema:

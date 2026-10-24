@@ -4,13 +4,13 @@ import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { compileWorkflow } from '../src/compiler.js';
-import { runWorkflow } from '../src/engine.js';
-import { MockAgentRuntime } from '../src/runtime/mock.js';
-import { createSandboxFs, createWorkflowLoader } from '../src/services-node.js';
-import type { RunServices } from '../src/services.js';
-import type { WorkflowGraph, WorkflowNode } from '../src/types.js';
-import { ctl, data, n, registry, wf } from './helpers.js';
+import { compileWorkflow } from './adv.js';
+import { runWorkflow } from './adv.js';
+import { MockAgentRuntime } from '../../src/runtime/mock.js';
+import { createSandboxFs, createWorkflowLoader } from '../../src/services-node.js';
+import type { RunServices } from '../../src/services.js';
+import type { WorkflowGraph, WorkflowNode } from '../../src/types.js';
+import { ctl, data, n, registry, wf } from '../helpers.js';
 
 const reg = registry();
 

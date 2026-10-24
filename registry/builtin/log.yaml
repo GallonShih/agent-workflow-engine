@@ -1,5 +1,6 @@
 name: log
 kind: builtin
+tier: v1
 category: Utility
 description: 把 message 寫進執行紀錄（Execution Monitor 的 log 事件）；value 原樣傳出
 inputs:

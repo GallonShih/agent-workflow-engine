@@ -1,6 +1,7 @@
 import { ClassicPreset, NodeEditor, type GetSchemes } from 'rete';
 import { DataflowEngine, ControlFlowEngine } from 'rete-engine';
 import type { CompiledGraph, CompiledNode } from './compiler.js';
+import type { Edge } from './types.js';
 import { compileWorkflow, evalRule } from './compiler.js';
 import { builtins } from './nodes/builtins.js';
 import type { RunServices } from './services.js';
@@ -48,6 +49,7 @@ interface NodeState {
   status: NodeStatus;
   triggered: boolean;
   outputs?: Record<string, unknown>;
+  fired?: string[];
   settled: Promise<void>;
   resolve: () => void;
 }
@@ -68,7 +70,11 @@ export interface RunOptions {
   resume?: { fromRunId: string; results: Map<string, { outputs: Record<string, unknown>; fired: string[] }> };
   /** 外部取消（例如 server 收到 cancel） */
   signal?: AbortSignal;
+  /** 進階功能旗標（resume 需要；foreach / subflow / join 另外要求 graph 以 advanced 編譯） */
+  advanced?: boolean;
 }
+
+const ADVANCED_BEHAVIORS = ['join', 'foreach', 'subflow'];
 
 export class RunContext {
   runId: string;
@@ -129,6 +135,14 @@ export class GraphRun {
       if (e.kind === 'control') this.edgeState.set(c.id, 'pending');
     }
     const done = new Promise<void>((r) => (this.idle = r));
+    if (this.graph.v1) {
+      this.inflight++;
+      this.pump(nodes);
+      this.release();
+      await done;
+      for (const [id, st] of this.states) if (st.status === 'pending') this.skip(id, 'inputs never became available');
+      return;
+    }
     // 入口：control 節點且沒有 incoming control edge（start / loop_in / 其他 entry）
     const entries = [...this.graph.nodes.values()].filter(
       (cn) => cn.def.mode === 'control' && !this.graph.edges.some((e) => e.kind === 'control' && e.to.node === cn.id),
@@ -142,6 +156,59 @@ export class GraphRun {
 
   private release() {
     if (--this.inflight === 0) this.idle();
+  }
+
+  // ------------------------------------------------------------------ v1 scheduling
+  /**
+   * v1：沒有 control edge。每個 control-mode 節點在「所有上游生產者都 settle」後評估：
+   * - 每個有連線的輸入 port 至少要有一條「活的」連線（同一 port 多條連線 = 任一條活著即可，用來匯合 condition 兩側）
+   * - 任一個有連線的輸入 port 全部死掉（上游 skipped / failed，或是 condition 沒走的那一側）→ 這個節點 skipped
+   * - 都活著 → 執行（沒有任何連入的節點，例如 start / loop_in，一開始就執行）
+   */
+  private pump(nodes: Map<string, RuntimeNode>) {
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const [id, st] of this.states) {
+        const cn = this.graph.nodes.get(id)!;
+        if (cn.def.mode !== 'control' || st.triggered || st.status !== 'pending') continue;
+        if (this.producers(id).some((p) => { const s = this.states.get(p)!.status; return s === 'pending' || s === 'running'; })) continue;
+        const dead = this.deadInputs(id);
+        if (dead.length) {
+          this.skip(id, `no value for input ${dead.join(', ')} (upstream skipped, failed, or on the untaken side of a condition)`);
+          changed = true;
+          continue;
+        }
+        st.triggered = true;
+        this.ctx.emitEvent('node_triggered', { node_id: id, key: this.key(id), scope: this.scope });
+        this.inflight++;
+        this.executeNode(nodes.get(id)!, () => {}).finally(() => {
+          this.pump(nodes);
+          this.release();
+        });
+      }
+    }
+  }
+
+  /** 有連線、但所有連線都「死掉」的輸入 port */
+  private deadInputs(nodeId: string, seen = new Set<string>()): string[] {
+    const byPort = new Map<string, Edge[]>();
+    for (const e of this.graph.edges) if (e.kind === 'data' && e.to.node === nodeId) byPort.set(e.to.port, [...(byPort.get(e.to.port) ?? []), e]);
+    return [...byPort].filter(([, es]) => !es.some((e) => this.edgeLive(e, seen))).map(([p]) => p);
+  }
+
+  private edgeLive(e: Edge, seen: Set<string>): boolean {
+    const src = this.graph.nodes.get(e.from.node)!;
+    const st = this.states.get(src.id)!;
+    if (src.def.mode === 'data') {
+      // 純資料節點（template...）lazy 計算：它的輸入都活著才算活著
+      if (st.status === 'failed' || seen.has(src.id)) return false;
+      seen.add(src.id);
+      return this.deadInputs(src.id, seen).length === 0;
+    }
+    if (st.status !== 'success') return false;
+    if (src.def.name === 'condition') return (st.fired ?? []).includes(e.from.port);
+    return true;
   }
 
   private controlConns(filter: (c: Conn) => boolean): Conn[] {
@@ -275,6 +342,7 @@ export class GraphRun {
       st.outputs = res.outputs;
       st.status = 'success';
       fire = res.fire;
+      st.fired = fire;
       this.record(node.id, { status: 'success', outputs: res.outputs, fired: fire, duration_ms: Date.now() - started, ...res.record });
       this.ctx.emitEvent('node_succeeded', {
         node_id: node.id, key, scope: this.scope,
@@ -307,14 +375,22 @@ export class GraphRun {
   private async behavior(node: RuntimeNode, inputs: Record<string, unknown>): Promise<{ outputs: Record<string, unknown>; fire: string[]; record?: Partial<NodeRunRecord> }> {
     const cn = node.cn;
     const cfg = cn.node.config ?? {};
+    if (ADVANCED_BEHAVIORS.includes(cn.def.name) && !this.graph.advanced && !this.ctx.opts.advanced)
+      throw new Error(`"${cn.def.name}" is an advanced feature (compile with { advanced: true })`);
     switch (cn.def.name) {
       case 'start':
       case 'loop_in':
         return { outputs: this.entryValues, fire: ['success'] };
       case 'end':
-        this.endStatus = (cfg.status as 'success' | 'failed') ?? 'success';
-        this.endOutputs = inputs;
-        return { outputs: {}, fire: [], record: { outputs: { status: this.endStatus, ...inputs } } };
+      {
+        // 多個 end 都被走到時結果要跟完成順序無關：failed 優先，outputs 取決定結果的那個 end
+        const status = (cfg.status as 'success' | 'failed') ?? 'success';
+        if (this.endStatus !== 'failed') {
+          this.endStatus = status;
+          this.endOutputs = inputs;
+        }
+        return { outputs: {}, fire: [], record: { outputs: { status, ...inputs } } };
+      }
       case 'loop_out':
         this.loopOutputs = inputs;
         return { outputs: {}, fire: [], record: { outputs: inputs } };
@@ -336,7 +412,7 @@ export class GraphRun {
       outer?.addEventListener('abort', onAbort);
       try {
         return await spec.execute({
-          cn, cfg, inputs, services: this.ctx.opts.services ?? {}, signal: ac.signal,
+          cn, cfg, inputs, services: this.ctx.opts.services ?? {}, signal: ac.signal, v1: !!this.graph.v1,
           log: (level, message, data) => this.ctx.emitEvent('log', { node_id: cn.id, key: this.key(cn.id), scope: this.scope, data: { level, message, value: data } }),
         });
       } finally {
@@ -369,10 +445,13 @@ export class GraphRun {
         i++;
         break;
       }
-      carry = Object.fromEntries((cfg.carry ?? []).map((c) => [c.to, last![c.from]]));
+      // v1：與 loop 輸入同名的輸出自動帶到下一輪（例如 feedback）；舊格式用 config.carry
+      const pairs = cfg.carry ?? (this.graph.v1 ? Object.keys(cn.outputs).filter((k) => k in cn.inputs && k !== 'iterations' && k !== 'done').map((k) => ({ from: k, to: k })) : []);
+      carry = Object.fromEntries(pairs.map((c) => [c.to, last![c.from]]));
     }
     if (!last) throw new Error(`loop produced no successful iteration in ${i} attempts`);
-    return { outputs: { ...last, iterations: i }, fire: ['completed', done || !cfg.until ? 'done' : 'exhausted'] };
+    const outputs = this.graph.v1 ? { ...last, iterations: i, done: done || !cfg.until } : { ...last, iterations: i };
+    return { outputs, fire: ['completed', done || !cfg.until ? 'done' : 'exhausted'] };
   }
 
   /** foreach：每個元素一個 iteration scope（全新 GraphRun），loop_out 的輸入收集成陣列 */
@@ -409,7 +488,7 @@ export class GraphRun {
     if (this.scope.length >= 8) throw new Error('subflow nesting too deep (max 8 scopes)');
     const id = String(cn.node.config?.workflow);
     const source = await services.loadWorkflow(id);
-    const compiled = compileWorkflow(source, services.registry);
+    const compiled = compileWorkflow(source, services.registry, { advanced: true });
     if (!compiled.ok) throw new Error(`subflow "${id}" does not compile: ${compiled.errors.map((e) => e.code + ' ' + e.message).join('; ')}`);
     const scope = [...this.scope, { loop: cn.id, iteration: 0 }];
     // 把子流程「當下」的結構快照進事件流：歷史回放時即使來源 workflow 之後被改，也能畫出當時跑的圖
@@ -496,6 +575,7 @@ export class GraphRun {
 }
 
 export async function runWorkflow(graph: CompiledGraph, inputs: Record<string, unknown>, opts: RunOptions): Promise<RunResult> {
+  if (opts.resume && !opts.advanced) throw new Error('resume is an advanced feature (pass { advanced: true })');
   const ctx = new RunContext(opts);
   const started = Date.now();
   ctx.emitEvent('run_started', { data: { inputs } });

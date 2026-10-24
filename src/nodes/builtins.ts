@@ -26,6 +26,8 @@ export interface ExecArgs {
   services: RunServices;
   signal: AbortSignal;
   log: (level: string, message: string, data?: unknown) => void;
+  /** 這張圖是 DSL v1（data edges only） */
+  v1?: boolean;
 }
 export interface ExecResult {
   outputs: Record<string, unknown>;
@@ -78,9 +80,14 @@ function requireFs(services: RunServices) {
 
 export const builtins: Record<string, BuiltinSpec> = {
   condition: {
-    execute: ({ cfg, inputs }) => {
+    execute: ({ cfg, inputs, v1 }) => {
       const result = evalRule(cfg.rule as Rule, inputs.value);
-      return { outputs: {}, fire: [result ? 'true' : 'false'], record: { outputs: { result } } };
+      const side = result ? 'true' : 'false';
+      // 舊格式只看 fire（control ports）
+      if (!v1) return { outputs: {}, fire: [side], record: { outputs: { result } } };
+      // v1：資料從被選中的那一側輸出（true / false 是 data port）
+      const payload = inputs.data !== undefined ? inputs.data : inputs.value;
+      return { outputs: { [side]: payload }, fire: [side], record: { outputs: { result, [side]: payload } } };
     },
   },
 

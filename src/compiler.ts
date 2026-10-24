@@ -3,6 +3,9 @@ import type { NodeRegistry } from './registry.js';
 import { isCompatible, typeLabel, validateValue } from './schema.js';
 import { evalRule } from './rules.js';
 import { builtins, type PortSet } from './nodes/builtins.js';
+import { normalizeWorkflow, isV1 } from './dsl.js';
+import { tierOf } from './registry.js';
+import { fixFor, closest, V1_ALTERNATIVES } from './fixes.js';
 
 export { evalRule };
 
@@ -21,6 +24,15 @@ export interface CompiledNode {
 export interface CompiledGraph {
   nodes: Map<string, CompiledNode>;
   edges: Edge[];
+  /** v1：沒有 control edge，engine 依資料相依排程 */
+  v1?: boolean;
+  /** 以 advanced 旗標編譯（engine 才允許 foreach / subflow / join 等進階行為） */
+  advanced?: boolean;
+}
+
+export interface CompileOptions {
+  /** 開啟進階功能：舊版 hybrid 格式（control edges）、advanced 節點、巢狀 loop、loop carry / on_body_failure */
+  advanced?: boolean;
 }
 
 export interface Diagnostic {
@@ -29,6 +41,8 @@ export interface Diagnostic {
   node?: string;
   edge?: number;
   path?: string;
+  /** 具體的修正建議（給人與 MCP agent 看） */
+  fix?: string;
 }
 
 export interface CompileResult {
@@ -36,6 +50,8 @@ export interface CompileResult {
   errors: Diagnostic[];
   warnings: Diagnostic[];
   graph?: CompiledGraph;
+  /** 正規化後的 workflow（v1 字串 edges 已展開） */
+  workflow?: WorkflowGraph;
 }
 
 /** 不允許 Workflow JSON（例如 Planner 產生的）覆寫的安全相關欄位：權限只能來自 Node Registry */
@@ -58,7 +74,7 @@ const COMPOSITES = ['loop', 'foreach'];
  * - builtins[type].ports：依 config 產生 ports（Merge 輸入數、Switch cases、Join 輸入數 ...）
  * Compiler 與前端 Rete editor / 屬性面板共用，兩邊看到的 port / 型別一致。
  */
-export function resolveNodePorts(n: WorkflowNode, def: NodeDefinition, registry: NodeRegistry, body?: BodyPorts): ResolvedPorts {
+export function resolveNodePorts(n: WorkflowNode, def: NodeDefinition, registry: NodeRegistry, body?: BodyPorts, opts: { v1?: boolean } = {}): ResolvedPorts {
   let ports: ResolvedPorts = { inputs: def.inputs, outputs: def.outputs, controlInputs: def.control_inputs, controlOutputs: def.control_outputs };
   const dynIn = n.ports?.inputs ? registry.normalizePorts(n.ports.inputs, `${n.id}.ports.inputs`) : {};
   const dynOut = n.ports?.outputs ? registry.normalizePorts(n.ports.outputs, `${n.id}.ports.outputs`) : {};
@@ -104,7 +120,28 @@ export function resolveNodePorts(n: WorkflowNode, def: NodeDefinition, registry:
   for (const k of def.output_overrides ?? []) if (dynOut[k] && def.outputs[k]) ports.outputs = { ...ports.outputs, [k]: dynOut[k] };
   const spec = builtins[n.type];
   if (spec?.ports) ports = { ...spec.ports(n.config ?? {}, ports), body: ports.body };
+  if (opts.v1) {
+    // v1：沒有 control ports。condition 用資料路由（true / false 輸出），loop 多一個 done 輸出
+    ports = { ...ports, controlInputs: [], controlOutputs: [] };
+    if (n.type === 'condition') ports.outputs = { true: { schema: {}, required: false }, false: { schema: {}, required: false } };
+    if (n.type === 'loop') ports.outputs = { ...ports.outputs, done: { schema: { type: 'boolean' } } };
+  }
   return ports;
+}
+
+/**
+ * v1 condition 的 true / false 輸出型別 = 接到 data（沒有就 value）的上游輸出型別。
+ * compiler 與前端 editor 共用（前端連線檢查才會跟 compiler 一致）。
+ */
+export function inferPassThroughTypes(nodes: Map<string, { node: WorkflowNode; outputs: Record<string, DataPortDef> }>, edges: Edge[]): void {
+  for (let pass = 0; pass < 4; pass++) {
+    for (const [id, cn] of nodes) {
+      if (cn.node.type !== 'condition' || !('true' in cn.outputs)) continue;
+      const e = edges.find((x) => x.kind === 'data' && x.to.node === id && x.to.port === 'data') ?? edges.find((x) => x.kind === 'data' && x.to.node === id && x.to.port === 'value');
+      const schema = e ? nodes.get(e.from.node)?.outputs[e.from.port]?.schema : undefined;
+      if (schema) cn.outputs = { true: { schema, required: false }, false: { schema, required: false } };
+    }
+  }
 }
 
 /**
@@ -112,29 +149,49 @@ export function resolveNodePorts(n: WorkflowNode, def: NodeDefinition, registry:
  * 檢查 unknown node/port、edge kind、Ajv/JSON Schema 型別相容、必填輸入、常數值、fan-in、
  * 外層 DAG cycle、builtin 設定（condition/join/loop），並遞迴編譯 loop body。
  */
-export function compileWorkflow(wf: WorkflowGraph, registry: NodeRegistry): CompileResult {
+export function compileWorkflow(raw: WorkflowGraph | unknown, registry: NodeRegistry, opts: CompileOptions = {}): CompileResult {
   const errors: Diagnostic[] = [];
   const warnings: Diagnostic[] = [];
-  const graph = compileGraph(wf, registry, errors, warnings, '', undefined);
-  return { ok: errors.length === 0, errors, warnings, graph: errors.length === 0 ? graph : undefined };
+  const v1 = isV1(raw);
+  const advanced = !!opts.advanced;
+  const { graph: wf, errors: edgeErrors } = normalizeWorkflow(raw);
+  for (const e of edgeErrors) errors.push({ code: 'INVALID_EDGE', message: `${e.path}edges[${e.index}]: ${e.message}`, edge: e.index, path: e.path, fix: e.fix });
+  if (!v1 && !advanced && raw && typeof raw === 'object') {
+    errors.push({
+      code: 'LEGACY_FORMAT',
+      message: 'workflow is not v1 (missing "version": 1); the hybrid data+control format is an advanced feature',
+      path: '',
+      fix: 'Add "version": 1 and write edges as data connections only, e.g. "edges": ["start.request -> planner.request"]. Existing files can be converted with `npm run convert -- <file>` (convertToV1).',
+    });
+  }
+  const ctx: Ctx = { registry, errors, warnings, v1, advanced, all: [] };
+  const graph = compileGraph(wf, ctx, '', undefined);
+  for (const d of errors) d.fix ??= fixFor(d, ctx);
+  for (const d of warnings) d.fix ??= fixFor(d, ctx);
+  return { ok: errors.length === 0, errors, warnings, graph: errors.length === 0 ? graph : undefined, workflow: wf };
 }
 
-function compileGraph(
-  wf: WorkflowGraph,
-  registry: NodeRegistry,
-  errors: Diagnostic[],
-  warnings: Diagnostic[],
-  prefix: string,
-  loop: BodyPorts | undefined,
-): CompiledGraph {
+export interface Ctx {
+  registry: NodeRegistry;
+  errors: Diagnostic[];
+  warnings: Diagnostic[];
+  v1: boolean;
+  advanced: boolean;
+  /** 所有 scope 的節點（產生修正建議用） */
+  all: { prefix: string; nodes: Map<string, CompiledNode>; edges: Edge[] }[];
+}
+
+function compileGraph(wf: WorkflowGraph, ctx: Ctx, prefix: string, loop: BodyPorts | undefined): CompiledGraph {
+  const { registry, errors, warnings, v1, advanced } = ctx;
   const err = (code: string, message: string, extra: Partial<Diagnostic> = {}) =>
     errors.push({ code, message: prefix + message, ...extra, node: extra.node ? prefix + extra.node : undefined, path: prefix });
   const nodes = new Map<string, CompiledNode>();
 
   if (!Array.isArray(wf?.nodes) || !Array.isArray(wf?.edges)) {
-    err('INVALID_WORKFLOW', 'workflow must have nodes[] and edges[]');
+    err('INVALID_WORKFLOW', 'workflow must have nodes[] and edges[]', { fix: 'A workflow is {"version": 1, "nodes": [{"id": "start", "type": "start", ...}], "edges": ["a.out -> b.in"]}.' });
     return { nodes, edges: [] };
   }
+  ctx.all.push({ prefix, nodes, edges: wf.edges });
 
   for (const n of wf.nodes) {
     if (!n.id || nodes.has(n.id)) {
@@ -146,6 +203,13 @@ function compileGraph(
       err('UNKNOWN_NODE_TYPE', `node "${n.id}" uses unknown type "${n.type}" (not in Node Registry)`, { node: n.id });
       continue;
     }
+    const tier = tierOf(def);
+    if (tier === 'advanced' && !advanced)
+      err('NODE_NOT_IN_V1', `node "${n.id}" uses "${n.type}", an advanced node (not enabled in v1)`, { node: n.id, fix: V1_ALTERNATIVES[n.type] ?? `Use one of the v1 node types (list_node_types), or enable advanced mode.` });
+    if (v1 && (n.type === 'join' || n.type === 'switch'))
+      err('NODE_NOT_IN_V1', `node "${n.id}": "${n.type}" only exists in the legacy control-edge format`, { node: n.id, fix: V1_ALTERNATIVES[n.type] });
+    if (v1 && n.type === 'loop' && loop && !advanced)
+      err('NESTED_LOOP_NOT_IN_V1', `loop "${n.id}" is nested inside another loop body (nested loops are an advanced feature)`, { node: n.id, fix: 'Flatten it: use a single loop whose body contains all the steps, or enable advanced mode.' });
     for (const f of POLICY_FIELDS) {
       if (n.config && f in n.config) err('POLICY_OVERRIDE', `node "${n.id}" may not override "${f}" — permissions come from the Node Registry`, { node: n.id });
     }
@@ -166,7 +230,7 @@ function compileGraph(
 
     let ports: ResolvedPorts = { inputs: def.inputs, outputs: def.outputs, controlInputs: def.control_inputs, controlOutputs: def.control_outputs };
     try {
-      ports = resolveNodePorts(n, def, registry, loop);
+      ports = resolveNodePorts(n, def, registry, loop, { v1 });
     } catch (e) {
       err('INVALID_PORT_SCHEMA', (e as Error).message, { node: n.id });
     }
@@ -175,15 +239,16 @@ function compileGraph(
     if (COMPOSITES.includes(n.type)) {
       if (!n.body) err('LOOP_WITHOUT_BODY', `${n.type} "${n.id}" needs a body subgraph`, { node: n.id });
       else {
-        cn.body = compileGraph(n.body, registry, errors, warnings, `${prefix}${n.id}.body/`, ports.body);
+        cn.body = compileGraph(n.body, ctx, `${prefix}${n.id}.body/`, ports.body);
         const types = n.body.nodes.map((b) => b.type);
         if (types.filter((t) => t === 'loop_in').length !== 1 || types.filter((t) => t === 'loop_out').length !== 1)
           err('LOOP_BODY_PORTS', `${n.type} "${n.id}" body needs exactly one loop_in and one loop_out`, { node: n.id });
       }
-      if (n.type === 'loop') checkLoopConfig(cn, err);
+      if (n.type === 'loop') checkLoopConfig(cn, err, ctx);
     }
     nodes.set(n.id, cn);
   }
+  if (v1) inferPassThroughTypes(nodes, wf.edges);
 
   // ---- edges ----
   const dataIn = new Map<string, number>();
@@ -196,7 +261,9 @@ function compileGraph(
       return;
     }
     const label = `${e.from.node}.${e.from.port} → ${e.to.node}.${e.to.port}`;
-    if (e.kind === 'data') {
+    if (v1 && e.kind !== 'data') {
+      err('CONTROL_EDGE_IN_V1', `edge #${i} ${label} is a control edge; v1 has data connections only`, { edge: i, fix: 'Remove it. A node runs when all its connected inputs have values; connect a data output instead.' });
+    } else if (e.kind === 'data') {
       const out = src.outputs[e.from.port];
       const inp = dst.inputs[e.to.port];
       if (!out) err(src.controlOutputs.includes(e.from.port) ? 'EDGE_KIND_MISMATCH' : 'UNKNOWN_PORT', `data edge ${label}: "${e.from.port}" is not a data output of ${src.def.name}`, { edge: i });
@@ -206,7 +273,7 @@ function compileGraph(
         if (!c.ok) err('TYPE_MISMATCH', `data edge ${label}: ${typeLabel(out.schema)} → ${typeLabel(inp.schema)} incompatible (${c.reason})`, { edge: i });
         const k = `${e.to.node}.${e.to.port}`;
         dataIn.set(k, (dataIn.get(k) ?? 0) + 1);
-        if (dataIn.get(k)! > 1 && !inp.multiple) err('MULTIPLE_DATA_INPUTS', `input ${k} already has a data edge (set multiple: true to collect)`, { edge: i });
+        if (dataIn.get(k)! > 1 && !inp.multiple && !v1) err('MULTIPLE_DATA_INPUTS', `input ${k} already has a data edge (set multiple: true to collect)`, { edge: i });
       }
     } else if (e.kind === 'control') {
       if (!src.controlOutputs.includes(e.from.port)) err(src.outputs[e.from.port] ? 'EDGE_KIND_MISMATCH' : 'UNKNOWN_PORT', `control edge ${label}: "${e.from.port}" is not a control output of ${src.def.name} (${src.controlOutputs.join(', ') || 'none'})`, { edge: i });
@@ -229,8 +296,10 @@ function compileGraph(
       if (port.required !== false && port.default === undefined && constant === undefined && !connected)
         err('MISSING_REQUIRED_INPUT', `node "${cn.id}" (${cn.def.name}) required input "${name}: ${typeLabel(port.schema)}" is not connected`, { node: cn.id });
     }
+    if (v1 && cn.def.name === 'end' && !wf.edges.some((e) => e.to.node === cn.id))
+      err('END_UNCONNECTED', `end node "${cn.id}" has no incoming connection — it would finish the run immediately`, { node: cn.id });
     const hasControlIn = wf.edges.some((e) => e.kind === 'control' && e.to.node === cn.id);
-    if (cn.def.mode === 'control' && cn.controlInputs.length > 0 && !hasControlIn)
+    if (!v1 && cn.def.mode === 'control' && cn.controlInputs.length > 0 && !hasControlIn)
       warnings.push({ code: 'ENTRY_NODE', message: `${prefix}node "${cn.id}" has no incoming control edge — it runs as an entry node`, node: prefix + cn.id, path: prefix });
   }
 
@@ -238,13 +307,26 @@ function compileGraph(
   const cycle = findCycle([...nodes.keys()], wf.edges.filter((e) => nodes.has(e.from.node) && nodes.has(e.to.node)));
   if (cycle) err('CYCLE', `cycle detected: ${cycle.join(' → ')} (use a loop composite node instead of a back-edge)`);
 
-  return { nodes, edges: wf.edges.filter((e) => nodes.has(e.from?.node) && nodes.has(e.to?.node)) };
+  return { nodes, edges: wf.edges.filter((e) => nodes.has(e.from?.node) && nodes.has(e.to?.node)), v1: v1 || undefined, advanced: advanced || undefined };
 }
 
-function checkLoopConfig(cn: CompiledNode, err: (c: string, m: string, x?: Partial<Diagnostic>) => void) {
+function checkLoopConfig(cn: CompiledNode, err: (c: string, m: string, x?: Partial<Diagnostic>) => void, ctx: Ctx) {
   const cfg = (cn.node.config ?? {}) as unknown as LoopConfig;
   if (cfg.until) {
-    if (!cn.outputs[cfg.until.port]) err('INVALID_CONFIG', `loop "${cn.id}": until.port "${cfg.until.port}" is not a loop output`, { node: cn.id });
+    if (!cn.outputs[cfg.until.port])
+      err('INVALID_CONFIG', `loop "${cn.id}": until.port "${cfg.until.port}" is not a loop output`, { node: cn.id, fix: `until.port must be one of the loop outputs: ${Object.keys(cn.outputs).join(', ')}${closest(cfg.until.port, Object.keys(cn.outputs)) ? ` (did you mean "${closest(cfg.until.port, Object.keys(cn.outputs))}"?)` : ''}` });
+  }
+  if (ctx.v1) {
+    const declared = Object.keys((cn.node.ports?.outputs ?? {}) as object);
+    if (declared.includes('done')) err('INVALID_PORT_SCHEMA', `loop "${cn.id}": output name "done" is reserved in v1 (true when until was met)`, { node: cn.id, fix: 'Rename the loop output.' });
+    if (!ctx.advanced) {
+      if (cfg.carry) err('V1_LOOP_CONFIG', `loop "${cn.id}": config.carry is an advanced option`, { node: cn.id, fix: 'Remove config.carry. In v1, a loop output with the same name as a loop input (e.g. "feedback") is passed into the next iteration automatically.' });
+      if (cfg.on_body_failure) err('V1_LOOP_CONFIG', `loop "${cn.id}": config.on_body_failure is an advanced option`, { node: cn.id, fix: 'Remove config.on_body_failure (v1: a failing iteration fails the loop; agent nodes already retry via config.retry).' });
+    }
+    for (const name of Object.keys(cn.outputs).filter((k) => k in cn.inputs && k !== 'iterations' && k !== 'done')) {
+      const ok = isCompatible(cn.outputs[name].schema, cn.inputs[name].schema);
+      if (!ok.ok) err('TYPE_MISMATCH', `loop "${cn.id}": output "${name}" is fed back into input "${name}" next iteration but types differ (${ok.reason})`, { node: cn.id, fix: `Give the loop output and input "${name}" the same type, or rename one of them.` });
+    }
   }
   for (const c of cfg.carry ?? []) {
     const from = cn.outputs[c.from];

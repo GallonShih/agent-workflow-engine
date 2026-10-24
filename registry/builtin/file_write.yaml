@@ -1,5 +1,6 @@
 name: file_write
 kind: builtin
+tier: advanced
 category: IO
 description: 寫入沙盒工作目錄（預設 .workspace/）內的檔案；不允許絕對路徑、.. 或 symlink 逃出沙盒
 inputs:

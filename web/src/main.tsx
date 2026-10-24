@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { compileWorkflow, resolveNodePorts, type BodyPorts, type CompileResult, type Diagnostic, type ResolvedPorts } from '../../src/compiler.js';
 import { bodyPortsAt, boundaryAnnotations, getGraphAt, isDrillable, setGraphAt } from '../../src/graph-path.js';
 import { runWorkflow } from '../../src/engine.js';
+import { isV1, normalizeWorkflow, serializeV1 } from '../../src/dsl.js';
 import { demoRuntime } from '../../src/demo/scenario.js';
 import type { RunEvent, Scope, WorkflowGraph, WorkflowNode } from '../../src/types.js';
 import demoWorkflow from '../../workflows/fix-until-tests-pass.json';
@@ -13,7 +14,12 @@ import { NodeRunPanel, RunHistory, RunSummary, Badge } from './monitor-panel.js'
 import { applyEvent, emptyRun, iterationsOf, reduceEvents, resolveScope, scopeKeyOf, statusesFor, type RunView } from './monitor.js';
 import { backend, type RunMeta } from './api.js';
 
-const STORAGE_KEY = 'agent-workflow-poc:workflow';
+const STORAGE_KEY = 'agent-workflow-poc:workflow:v1';
+const ADV_KEY = 'agent-workflow-poc:advanced';
+/** 檔案格式（v1 edges 是字串）→ 編輯器內部格式（edge 物件）；舊格式原樣 */
+const norm = (wf: unknown): WorkflowGraph => normalizeWorkflow(wf).graph;
+/** 內部格式 → 存檔格式（v1 寫回精簡字串 edges） */
+const toFile = (wf: WorkflowGraph) => (isV1(wf) ? serializeV1(wf) : wf);
 const registry = loadBrowserRegistry();
 const clone = <T,>(x: T): T => JSON.parse(JSON.stringify(x));
 const DEMO_INPUTS = { request: '修正 parser 空字串 bug 並讓測試通過', repository: 'github.com/acme/parser' };
@@ -79,8 +85,12 @@ function App() {
   const api = useRef<EditorApi | null>(null);
   const [workflow, setWorkflow] = useState<WorkflowGraph>(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
-    return saved ? JSON.parse(saved) : clone(demoWorkflow as WorkflowGraph);
+    return norm(saved ? JSON.parse(saved) : clone(demoWorkflow));
   });
+  /** 進階功能開關（預設關）：舊格式 / advanced 節點 / 多層 drill-down / subflow 子圖 / resume / 瀏覽器內執行 */
+  const [advanced, setAdvancedState] = useState(() => localStorage.getItem(ADV_KEY) === '1');
+  const advRef = useRef(advanced);
+  advRef.current = advanced;
   const wfRef = useRef(workflow);
   wfRef.current = workflow;
   // 畫布路徑（[] = 主流程）與每層選定的 iteration（null = 跟著最新一輪）
@@ -134,7 +144,7 @@ function App() {
   const validateTimer = useRef<ReturnType<typeof setTimeout>>();
   function validateNow(): CompileResult {
     const wf = commit();
-    const r = compileWorkflow(wf, registry);
+    const r = compileWorkflow(wf, registry, { advanced: advRef.current });
     setDiag(r);
     const v = viewOf(wf);
     const counts: Record<string, number> = {};
@@ -193,7 +203,7 @@ function App() {
       if (v.composite?.type === 'subflow' && !v.inner.length && n.type === 'end') boundaries[n.id] = '子流程輸出';
     }
     const annotations = v.composite && v.outer ? boundaryAnnotations(v.outer, v.composite, v.graph) : undefined;
-    await api.current.load(v.graph, { body: v.body, readOnly: v.readOnly, annotations, boundaries });
+    await api.current.load(v.graph, { body: v.body, readOnly: v.readOnly, annotations, boundaries, v1: isV1(v.root) });
     validateNow();
     paint();
   }
@@ -202,9 +212,9 @@ function App() {
   async function loadWorkflowSource(id: string): Promise<WorkflowGraph | undefined> {
     if (backendInfoRef.current) {
       const r = await fetch(`/api/workflows/${encodeURIComponent(id)}`).catch(() => null);
-      if (r?.ok) return r.json();
+      if (r?.ok) return norm(await r.json());
     }
-    return BUNDLED[id] ? clone(BUNDLED[id]) : undefined;
+    return BUNDLED[id] ? norm(clone(BUNDLED[id])) : undefined;
   }
 
   /** drill-in：雙擊 loop / foreach / subflow，或從屬性 / 監控面板進入（可指定 iteration） */
@@ -212,6 +222,8 @@ function App() {
     const v = viewOf();
     const n = v?.graph.nodes.find((x) => x.id === id);
     if (!v || !n || !isDrillable(n)) return;
+    if (!advRef.current && (n.type !== 'loop' || pathRef.current.length > 0))
+      return log(`「${n.type}」子圖 / 多層 drill-down 是進階功能（工具列的「進階功能」開關）`, 'error');
     const wf = commit();
     const crumb: Crumb = { id, kind: n.type, label: n.label || n.id };
     if (n.type === 'subflow') {
@@ -254,7 +266,7 @@ function App() {
     const wf = commit();
     const id = wf.id;
     if (!id) return log('這份 workflow 沒有 id，無法存回 workflows/', 'error');
-    const r = await fetch(`/api/workflows/${encodeURIComponent(id)}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(wf) });
+    const r = await fetch(`/api/workflows/${encodeURIComponent(id)}${advRef.current ? '?advanced=1' : ''}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(toFile(wf)) });
     const body = await r.json().catch(() => ({}));
     if (r.ok) log(`💾 已存回 workflows/${id}.json`);
     else log(`存回失敗（${r.status}）：${body.error ?? ''}${body.errors ? ' — ' + body.errors.map((e: Diagnostic) => e.message).join('；') : ''}`, 'error');
@@ -347,9 +359,13 @@ function App() {
     resetRun();
     setRunning(true);
     setRightTab('run');
+    if (mode !== 'backend' && !advRef.current) {
+      setRunning(false);
+      return log('需要 backend（npm run server）才能執行；瀏覽器內執行是進階功能', 'error');
+    }
     if (mode === 'backend') {
       try {
-        const { run_id } = await backend.startRun({ workflow: wfRef.current, scenario, mock_delay_ms: 300, inputs: DEMO_INPUTS });
+        const { run_id } = await backend.startRun({ workflow: toFile(wfRef.current), scenario, mock_delay_ms: 300, inputs: DEMO_INPUTS, advanced: advRef.current });
         log(`▶ backend run ${run_id}（SSE 串流中）`);
         attachStream(run_id);
       } catch (e) {
@@ -400,9 +416,10 @@ function App() {
       const r = await backend.getRun(id);
       resetRun();
       if (r.workflow) {
-        wfRef.current = r.workflow;
-        setWorkflow(r.workflow);
-        await show([], [], r.workflow);
+        const w = norm(r.workflow);
+        wfRef.current = w;
+        setWorkflow(w);
+        await show([], [], w);
       }
       setActiveRun(r.meta);
       setRightTab('run');
@@ -437,7 +454,7 @@ function App() {
   async function resume() {
     if (!activeRun) return;
     try {
-      const { run_id } = await backend.resume(activeRun.run_id, { mock_delay_ms: 300 });
+      const { run_id } = await backend.resume(activeRun.run_id, { mock_delay_ms: 300, advanced: true });
       log(`↻ resume ${activeRun.run_id} → 新 run ${run_id}（沿用已成功的 agent 節點）`);
       resetRun();
       setRightTab('run');
@@ -453,14 +470,14 @@ function App() {
   // ------------------------------------------------------------ files
   function save() {
     const wf = commit();
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(wf));
-    setJsonText(JSON.stringify(wf, null, 2));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(toFile(wf)));
+    setJsonText(JSON.stringify(toFile(wf), null, 2));
     setBottomTab('json');
     log('💾 已存到 localStorage');
   }
   async function loadJson(text: string) {
     try {
-      const wf = JSON.parse(text) as WorkflowGraph;
+      const wf = norm(JSON.parse(text));
       wfRef.current = wf;
       setWorkflow(wf);
       setBackStack([]);
@@ -478,13 +495,25 @@ function App() {
   async function reset() {
     localStorage.removeItem(STORAGE_KEY);
     await loadJson(JSON.stringify(demoWorkflow));
+    setJsonText('');
   }
   function download() {
     const wf = commit();
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([JSON.stringify(wf, null, 2)], { type: 'application/json' }));
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(toFile(wf), null, 2)], { type: 'application/json' }));
     a.download = 'workflow.json';
     a.click();
+  }
+
+  async function setAdvanced(on: boolean) {
+    localStorage.setItem(ADV_KEY, on ? '1' : '0');
+    advRef.current = on;
+    setAdvancedState(on);
+    if (!on && mode === 'browser' && backendInfo) setMode('backend');
+    log(on ? '⚙ 進階功能已開啟：舊版 control-edge 格式、advanced 節點、多層 drill-down / subflow 子圖、resume、瀏覽器內執行' : '進階功能已關閉（DSL v1）');
+    // 不在 v1 的深層路徑 → 回到主流程
+    const p = !on && (pathRef.current.length > 1 || pathRef.current.some((c) => c.kind !== 'loop')) ? [] : pathRef.current;
+    await show(p, picksRef.current.slice(0, p.length), commit());
   }
 
   // ------------------------------------------------------------ derived for panels
@@ -496,7 +525,7 @@ function App() {
   let selPorts: ResolvedPorts | null = null;
   if (selNode && selDef) {
     try {
-      selPorts = resolveNodePorts(selNode, selDef, registry, cur?.body);
+      selPorts = resolveNodePorts(selNode, selDef, registry, cur?.body, { v1: isV1(cur?.root) });
     } catch {
       selPorts = null;
     }
@@ -507,12 +536,17 @@ function App() {
   const library = useMemo(() => {
     const groups: Record<string, string[]> = {};
     const order = ['Flow', 'Logic', 'Data', 'Utility', 'IO', 'Agent Nodes'];
-    for (const d of registry.list()) {
-      if (['loop_in', 'loop_out'].includes(d.name) || d.source?.includes('test')) continue;
+    for (const d of registry.list({ advanced })) {
+      if (['loop_in', 'loop_out'].includes(d.name) || /(^|\/)test\//.test(d.source ?? '')) continue; // 只排除 test/ 目錄下的測試用節點（不能用 includes('test')：會把 testing_agent 也濾掉）
       (groups[d.category ?? (d.kind === 'agent' ? 'Agent Nodes' : 'Other')] ??= []).push(d.name);
     }
     return Object.entries(groups).sort(([a], [b]) => (order.indexOf(a) + 99) % 99 - ((order.indexOf(b) + 99) % 99));
-  }, []);
+  }, [advanced]);
+  const v1View = isV1(cur?.root);
+  // v1：loop 的 carry / on_body_failure 是進階選項，屬性面板不顯示
+  const selDefView = selDef && v1View && !advanced && selDef.name === 'loop' && selDef.config_schema
+    ? { ...selDef, config_schema: { ...selDef.config_schema, properties: Object.fromEntries(Object.entries((selDef.config_schema.properties ?? {}) as Record<string, unknown>).filter(([k]) => !['carry', 'on_body_failure'].includes(k))) } }
+    : selDef;
   const btn = { padding: '5px 9px', cursor: 'pointer' } as const;
   const run_ = runRef.current;
   const scope = resolveScope(run_, path.map((c) => c.id), picks);
@@ -524,10 +558,14 @@ function App() {
       <div style={{ padding: '6px 10px', borderBottom: '1px solid #ddd', display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', fontSize: 12 }}>
         <b style={{ marginRight: 8, fontSize: 14 }}>Agent Workflow Editor</b>
         <span style={{ borderLeft: '1px solid #ddd', height: 22 }} />
-        <select data-testid="run-mode" value={mode} onChange={(e) => setMode(e.target.value as 'backend' | 'browser')} style={btn}>
-          <option value="backend" disabled={!backendInfo}>Backend 執行{backendInfo ? `（${backendInfo.runtime.mode}）` : '（未連線）'}</option>
-          <option value="browser">瀏覽器內執行（mock）</option>
-        </select>
+        {advanced ? (
+          <select data-testid="run-mode" value={mode} onChange={(e) => setMode(e.target.value as 'backend' | 'browser')} style={btn}>
+            <option value="backend" disabled={!backendInfo}>Backend 執行{backendInfo ? `（${backendInfo.runtime.mode}）` : '（未連線）'}</option>
+            <option value="browser">瀏覽器內執行（mock）</option>
+          </select>
+        ) : (
+          <span data-testid="run-mode" style={{ color: backendInfo ? '#334155' : '#b91c1c' }}>{backendInfo ? `Backend（${backendInfo.runtime.mode}）` : 'backend 未連線（npm run server）'}</span>
+        )}
         <select value={scenario} onChange={(e) => setScenario(e.target.value as 'pass' | 'fail')} style={btn} title="demo mock agents 的情境">
           <option value="pass">情境：第 3 輪測試通過</option>
           <option value="fail">情境：測試永遠失敗</option>
@@ -546,7 +584,11 @@ function App() {
           </select>
         )}
         <button style={btn} onClick={() => void reset()}>重設 demo</button>
-        <span style={{ marginLeft: 'auto', color: diag?.ok ? '#15803d' : '#b91c1c' }} data-testid="validation-status">
+        <label style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'pointer' }} title="舊版 control-edge 格式、advanced 節點（join / foreach / subflow …）、多層 drill-down、resume、瀏覽器內執行">
+          <input data-testid="advanced-toggle" type="checkbox" checked={advanced} onChange={(e) => void setAdvanced(e.target.checked)} /> 進階功能
+        </label>
+        <span style={{ color: '#64748b' }} data-testid="dsl-version">{v1View ? 'DSL v1' : '舊格式（control edges）'}</span>
+        <span style={{ color: diag?.ok ? '#15803d' : '#b91c1c' }} data-testid="validation-status">
           {diag ? (diag.ok ? `✓ 驗證通過（${diag.warnings.length} warnings）` : `✗ ${diag.errors.length} 個錯誤`) : ''}
         </span>
       </div>
@@ -607,7 +649,7 @@ function App() {
                   </span>
                 );
               })}
-              <span style={{ marginLeft: 'auto', color: '#94a3b8', fontSize: 12 }}>雙擊 loop / foreach / subflow 節點進入子圖</span>
+              <span style={{ marginLeft: 'auto', color: '#94a3b8', fontSize: 12 }}>{advanced ? '雙擊 loop / foreach / subflow 節點進入子圖' : '雙擊 loop 節點編輯它的 body'}</span>
             </div>
             <div style={{ position: 'relative', minHeight: 0 }}>
               <div ref={container} data-testid="canvas" style={{ position: 'absolute', inset: 0, background: readOnly ? '#f5f3ff' : '#f8fafc', overflow: 'hidden' }} />
@@ -639,11 +681,16 @@ function App() {
             </div>
           </div>
           <div style={{ borderTop: '1px solid #ddd', display: 'grid', gridTemplateRows: 'auto 1fr', minHeight: 0 }}>
-            <Tabs tabs={[['diag', `Diagnostics${diag ? `（${diag.errors.length}/${diag.warnings.length}）` : ''}`], ['log', 'Log'], ['json', 'Workflow JSON']]} value={bottomTab} onChange={(t) => { setBottomTab(t); if (t === 'json') setJsonText(JSON.stringify(commit(), null, 2)); }} />
+            <Tabs tabs={[['diag', `Diagnostics${diag ? `（${diag.errors.length}/${diag.warnings.length}）` : ''}`], ['log', 'Log'], ['json', 'Workflow JSON']]} value={bottomTab} onChange={(t) => { setBottomTab(t); if (t === 'json') setJsonText(JSON.stringify(toFile(commit()), null, 2)); }} />
             <div style={{ overflow: 'auto', fontSize: 12, padding: bottomTab === 'json' ? 0 : 8, minHeight: 0 }}>
               {bottomTab === 'diag' && (
                 <div data-testid="diagnostics">
-                  {diag?.errors.map((d, i) => <div key={i} style={{ color: '#b91c1c', cursor: d.node ? 'pointer' : undefined }} onClick={() => d.node && api.current?.select(d.node.split('/').pop()!)}>[{d.code}] {d.message}</div>)}
+                  {diag?.errors.map((d, i) => (
+                    <div key={i} style={{ color: '#b91c1c', cursor: d.node ? 'pointer' : undefined, marginBottom: 2 }} onClick={() => d.node && api.current?.select(d.node.split('/').pop()!)}>
+                      [{d.code}] {d.message}
+                      {d.fix && <div style={{ color: '#475569', paddingLeft: 14 }}>↳ {d.fix}</div>}
+                    </div>
+                  ))}
                   {diag?.warnings.map((d, i) => <div key={i} style={{ color: '#92400e' }}>[{d.code}] {d.message}</div>)}
                   {diag && !diag.errors.length && <div style={{ color: '#15803d' }}>沒有錯誤（每次修改都會用同一份 compileWorkflow 重新驗證）</div>}
                 </div>
@@ -653,7 +700,7 @@ function App() {
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', height: '100%' }}>
                   <textarea data-testid="workflow-json" value={jsonText} onChange={(e) => setJsonText(e.target.value)} style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11, border: 0, padding: 8, resize: 'none' }} />
                   <div style={{ padding: 6, display: 'flex', flexDirection: 'column', gap: 4 }}>
-                    <button onClick={() => setJsonText(JSON.stringify(commit(), null, 2))}>重新整理</button>
+                    <button onClick={() => setJsonText(JSON.stringify(toFile(commit()), null, 2))}>重新整理</button>
                     <button onClick={() => void loadJson(jsonText)}>套用 JSON</button>
                   </div>
                 </div>
@@ -677,7 +724,7 @@ function App() {
                     <button onClick={play}>▶ 重播</button>
                   </>
                 )}
-                {mode === 'backend' && !running && ['failed', 'cancelled', 'interrupted'].includes(activeRun.status) && (
+                {advanced && mode === 'backend' && !running && ['failed', 'cancelled', 'interrupted'].includes(activeRun.status) && (
                   <button data-testid="resume" onClick={() => void resume()}>↻ Resume（沿用成功的 agent 節點）</button>
                 )}
                 {activeRun.resumed_from && <span>resume 自 <code>{activeRun.resumed_from}</code></span>}
@@ -704,7 +751,7 @@ function App() {
               <>
                 {readOnly && <div style={{ padding: '8px 12px', fontSize: 12, background: '#f5f3ff', color: '#5b21b6' }}>🔒 sub-workflow 唯讀：屬性僅供檢視</div>}
                 <fieldset disabled={readOnly} style={{ border: 0, margin: 0, padding: 0, minWidth: 0 }}>
-                  <PropertiesPanel key={`${path.map((c) => c.id).join('/')}/${selNode.id}`} node={selNode} def={selDef} registry={registry} ports={selPorts} errors={selErrors} connectedInputs={connected}
+                  <PropertiesPanel key={`${path.map((c) => c.id).join('/')}/${selNode.id}`} v1={v1View} node={selNode} def={selDefView!} registry={registry} ports={selPorts} errors={selErrors} connectedInputs={connected}
                     onChange={(n) => void updateNode(n)} onDelete={() => void deleteNode(selNode.id)}
                     onOpenBody={isDrillable(selNode) ? () => void drill(selNode.id) : undefined} />
                 </fieldset>

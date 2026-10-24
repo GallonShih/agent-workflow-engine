@@ -5,6 +5,8 @@ import type { RunEvent, WorkflowGraph } from '../types.js';
 import type { NodeRegistry } from '../registry.js';
 import { loadRegistry } from '../registry-fs.js';
 import { compileWorkflow } from '../compiler.js';
+import { isV1, normalizeWorkflow, serializeV1 } from '../dsl.js';
+import { tierOf } from '../registry.js';
 import { runWorkflow } from '../engine.js';
 import { makeRuntimeSelector, resolveRuntimeMode } from '../runtime/select.js';
 import type { AgentRuntime } from '../runtime/types.js';
@@ -13,6 +15,9 @@ import { createWorkflowLoader, nodeServices } from '../services-node.js';
 import type { RunServices } from '../services.js';
 import { resumeResultsFromEvents } from '../resume.js';
 import { RunStore, type RunMeta } from './run-store.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { createMcpServer } from '../mcp/server.js';
+import { injectBackend } from '../mcp/backend.js';
 
 export interface ServerOptions {
   root: string;
@@ -28,6 +33,13 @@ export interface ServerOptions {
   logger?: boolean;
   /** 存放 workflow JSON 的資料夾（預設 <root>/workflows；subflow 也從這裡載入） */
   workflowsDir?: string;
+  /**
+   * 進階功能預設值（預設關閉，或環境變數 WORKFLOW_ADVANCED=1）：舊版 control-edge 格式、advanced 節點、巢狀 loop、resume。
+   * 個別 request 也可以帶 advanced: true（前端「進階功能」開關）。
+   */
+  advanced?: boolean;
+  /** 提供 MCP Streamable HTTP endpoint（POST /mcp，stateless）。預設開啟 */
+  mcp?: boolean;
 }
 
 interface ActiveRun {
@@ -46,6 +58,7 @@ interface StartBody {
   scenario?: 'pass' | 'fail';
   pass_on?: number;
   mock_delay_ms?: number;
+  advanced?: boolean;
 }
 
 const MIME: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.json': 'application/json', '.wasm': 'application/wasm' };
@@ -58,6 +71,8 @@ export function buildServer(opts: ServerOptions): FastifyInstance & { runs: Map<
   const store = new RunStore(opts.runsDir ?? path.join(root, '.runs'));
   const runs = new Map<string, ActiveRun>();
   const activeIds = () => new Set([...runs.values()].filter((r) => r.meta.status === 'running').map((r) => r.meta.run_id));
+  const advancedDefault = opts.advanced ?? process.env.WORKFLOW_ADVANCED === '1';
+  const adv = (flag?: unknown) => advancedDefault || flag === true || flag === '1' || flag === 'true';
   const app = Fastify({ logger: opts.logger ?? false, bodyLimit: 5 * 1024 * 1024 }) as unknown as FastifyInstance & { runs: Map<string, ActiveRun> };
   app.runs = runs;
 
@@ -66,9 +81,16 @@ export function buildServer(opts: ServerOptions): FastifyInstance & { runs: Map<
     const f = path.join(workflowsDir, `${id.replace(/\.json$/, '')}.json`);
     return fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : undefined;
   };
+  const writeWorkflow = (id: string, wf: WorkflowGraph) => {
+    // v1 存成精簡格式（edges 字串）；舊格式原樣存
+    const normalized = normalizeWorkflow(wf).graph;
+    const out = isV1(wf) ? serializeV1({ ...normalized, id }) : { ...wf, id };
+    fs.writeFileSync(path.join(workflowsDir, `${id}.json`), JSON.stringify(out, null, 2) + '\n');
+  };
 
   function startRun(wf: WorkflowGraph, body: StartBody, extra: { workflow_id?: string; resume?: { fromRunId: string; events: RunEvent[] } } = {}) {
-    const compiled = compileWorkflow(wf, registry);
+    const advanced = adv(body.advanced);
+    const compiled = compileWorkflow(wf, registry, { advanced });
     if (!compiled.ok) return { error: { errors: compiled.errors, warnings: compiled.warnings } };
     const scenario = body.scenario ?? 'pass';
     const mock: AgentRuntime = demoRuntime({
@@ -106,6 +128,7 @@ export function buildServer(opts: ServerOptions): FastifyInstance & { runs: Map<
       onEvent,
       services,
       signal: active.ac.signal,
+      advanced,
       resume: extra.resume ? { fromRunId: extra.resume.fromRunId, results: resumeResultsFromEvents(extra.resume.events) } : undefined,
     })
       .then((result) => {
@@ -123,9 +146,13 @@ export function buildServer(opts: ServerOptions): FastifyInstance & { runs: Map<
   }
 
   // ---------------------------------------------------------------- API
-  app.get('/api/health', async () => ({ ok: true, runtime: resolveRuntimeMode(opts.runtime), registry: registry.list().length }));
+  app.get('/api/health', async () => ({ ok: true, runtime: resolveRuntimeMode(opts.runtime), registry: registry.list().length, advanced: advancedDefault }));
 
-  app.get('/api/registry', async () => ({ definitions: registry.list() }));
+  /** 預設只回 v1 節點（+ loop body 用的 internal 節點）；?advanced=1 回全部 */
+  app.get<{ Querystring: { advanced?: string } }>('/api/registry', async (req) => ({
+    advanced: adv(req.query.advanced),
+    definitions: adv(req.query.advanced) ? registry.list({ all: true }) : registry.list({ all: true }).filter((d) => tierOf(d) !== 'advanced'),
+  }));
 
   app.get('/api/workflows', async () =>
     fs
@@ -134,7 +161,7 @@ export function buildServer(opts: ServerOptions): FastifyInstance & { runs: Map<
       .sort()
       .map((f) => {
         const wf = JSON.parse(fs.readFileSync(path.join(workflowsDir, f), 'utf8')) as WorkflowGraph;
-        return { id: f.replace(/\.json$/, ''), name: wf.name, nodes: wf.nodes?.length ?? 0 };
+        return { id: f.replace(/\.json$/, ''), name: wf.name, nodes: wf.nodes?.length ?? 0, version: isV1(wf) ? 1 : 0 };
       }),
   );
 
@@ -152,15 +179,15 @@ export function buildServer(opts: ServerOptions): FastifyInstance & { runs: Map<
     if (!/^[A-Za-z0-9_-]+$/.test(id)) return reply.code(400).send({ error: 'invalid workflow id' });
     const wf = req.body;
     if (!wf || !Array.isArray(wf.nodes) || !Array.isArray(wf.edges)) return reply.code(400).send({ error: 'body must be a workflow { nodes, edges }' });
-    const r = compileWorkflow(wf, registry);
+    const r = compileWorkflow(wf, registry, { advanced: adv((req.query as { advanced?: string }).advanced) });
     if (!r.ok) return reply.code(422).send({ error: 'workflow has validation errors', errors: r.errors, warnings: r.warnings });
-    fs.writeFileSync(path.join(workflowsDir, `${id}.json`), JSON.stringify({ ...wf, id }, null, 2) + '\n');
+    writeWorkflow(id, wf);
     return { ok: true, id, warnings: r.warnings };
   });
 
-  app.post<{ Body: { workflow?: WorkflowGraph } }>('/api/validate', async (req, reply) => {
+  app.post<{ Body: { workflow?: WorkflowGraph; advanced?: boolean } }>('/api/validate', async (req, reply) => {
     if (!req.body?.workflow) return reply.code(400).send({ error: 'body.workflow is required' });
-    const r = compileWorkflow(req.body.workflow, registry);
+    const r = compileWorkflow(req.body.workflow, registry, { advanced: adv(req.body.advanced) });
     return { ok: r.ok, errors: r.errors, warnings: r.warnings };
   });
 
@@ -229,6 +256,7 @@ export function buildServer(opts: ServerOptions): FastifyInstance & { runs: Map<
   app.post<{ Params: { id: string }; Body: StartBody }>('/api/runs/:id/resume', async (req, reply) => {
     const id = req.params.id;
     if (!RunStore.validId(id)) return reply.code(400).send({ error: 'invalid run id' });
+    if (!adv(req.body?.advanced)) return reply.code(403).send({ error: 'resume is an advanced feature (start the server with advanced: true / WORKFLOW_ADVANCED=1, or send advanced: true)' });
     if (runs.get(id)?.meta.status === 'running') return reply.code(409).send({ error: 'run is still running' });
     const prev = store.get(id);
     if (!prev?.workflow) return reply.code(404).send({ error: 'run (or its saved workflow) not found' });
@@ -236,6 +264,26 @@ export function buildServer(opts: ServerOptions): FastifyInstance & { runs: Map<
     if ('error' in r) return reply.code(422).send({ error: 'workflow does not compile', ...r.error });
     return reply.code(202).send({ ...r, resumed_from: id });
   });
+
+  // ------------------------------------------------------- MCP（Streamable HTTP，stateless：每個 request 一個 server + transport）
+  if (opts.mcp !== false) {
+    const backend = injectBackend(app);
+    app.post('/mcp', async (req, reply) => {
+      const server = createMcpServer(backend);
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+      reply.hijack();
+      reply.raw.on('close', () => {
+        void transport.close();
+        void server.close();
+      });
+      await server.connect(transport);
+      await transport.handleRequest(req.raw, reply.raw, req.body);
+    });
+    const notAllowed = async (_req: unknown, reply: import('fastify').FastifyReply) =>
+      reply.code(405).header('allow', 'POST').send({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed (stateless server: use POST)' }, id: null });
+    app.get('/mcp', notAllowed);
+    app.delete('/mcp', notAllowed);
+  }
 
   // ------------------------------------------------------- static web/dist
   if (opts.staticDir && fs.existsSync(opts.staticDir)) {

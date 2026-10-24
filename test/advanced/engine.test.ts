@@ -1,12 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { compileWorkflow } from '../src/compiler.js';
-import { runWorkflow } from '../src/engine.js';
-import { MockAgentRuntime, sleep } from '../src/runtime/mock.js';
-import { demoRuntime } from '../src/demo/scenario.js';
-import type { WorkflowGraph } from '../src/types.js';
-import { ctl, data, n, registry, root, wf } from './helpers.js';
+import { compileWorkflow } from './adv.js';
+import { runWorkflow } from './adv.js';
+import { MockAgentRuntime, sleep } from '../../src/runtime/mock.js';
+import { demoRuntime } from '../../src/demo/scenario.js';
+import type { WorkflowGraph } from '../../src/types.js';
+import { ctl, data, n, registry, root, wf } from '../helpers.js';
 
 async function run(w: WorkflowGraph, runtime: MockAgentRuntime, inputs: Record<string, unknown> = {}) {
   const c = compileWorkflow(w, registry());
@@ -16,7 +16,7 @@ async function run(w: WorkflowGraph, runtime: MockAgentRuntime, inputs: Record<s
   return { res, rec };
 }
 
-const demo = () => JSON.parse(fs.readFileSync(path.join(root, 'workflows/fix-until-tests-pass.json'), 'utf8'));
+const demo = () => JSON.parse(fs.readFileSync(path.join(root, 'test/advanced/fixtures/fix-until-tests-pass.json'), 'utf8'));
 const demoInputs = { request: 'fix bug', repository: 'acme/parser' };
 
 describe('hybrid dataflow + control flow', () => {

@@ -1,5 +1,6 @@
 name: set
 kind: builtin
+tier: advanced
 category: Data
 mode: data
 description: 常數 / 設定值（純資料節點）；ports.outputs 宣告輸出型別，config.values 給值

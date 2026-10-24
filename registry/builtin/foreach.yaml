@@ -1,5 +1,6 @@
 name: foreach
 kind: builtin
+tier: advanced
 category: Logic
 description: 對 items 每個元素依序執行 body 子圖（loop_in 提供 item / index，loop_out 的每個輸入收集成陣列輸出）；每個元素是獨立的 iteration scope
 dynamic_ports: true

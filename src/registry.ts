@@ -1,4 +1,4 @@
-import type { DataPortDef, JSONSchema, NodeDefinition } from './types.js';
+import type { DataPortDef, JSONSchema, NodeDefinition, NodeTier } from './types.js';
 import { assertValidSchema } from './schema.js';
 
 /**
@@ -75,11 +75,21 @@ export class NodeRegistry {
     return this.defs.get(name);
   }
 
-  list(): NodeDefinition[] {
-    return [...this.defs.values()];
+  /**
+   * 預設只列出 v1 節點（精簡版給使用者 / MCP agent）；advanced: true 列出 v1 + advanced；all: true 連 internal（loop_in / loop_out）也列。
+   * tier 沒寫的 builtin 視為 advanced、agent 視為 v1。
+   */
+  list(opts: { advanced?: boolean; all?: boolean } = {}): NodeDefinition[] {
+    const defs = [...this.defs.values()];
+    if (opts.all) return defs;
+    return defs.filter((d) => tierOf(d) === 'v1' || (opts.advanced && tierOf(d) === 'advanced'));
   }
 }
 
+
+export function tierOf(def: NodeDefinition): NodeTier {
+  return def.tier ?? (def.kind === 'agent' ? 'v1' : 'advanced');
+}
 
 /** Agent 節點實例可調整的欄位（預設值取自 registry 的 config）；model / tools / MCP / skills 不在其中 */
 function agentConfigSchema(def: NodeDefinition): JSONSchema {

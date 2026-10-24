@@ -1,5 +1,6 @@
 name: schema_validate
 kind: builtin
+tier: advanced
 category: Utility
 description: 用 JSON Schema（Ajv）驗證輸入；通過走 valid、不通過走 invalid；value 輸出的型別就是 config.schema
 inputs:

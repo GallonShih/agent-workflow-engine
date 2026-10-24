@@ -1,5 +1,6 @@
 name: subflow
 kind: builtin
+tier: advanced
 category: Flow
 description: 執行另一個已存的 workflow（workflows/<id>.json）；輸入對應子 workflow 的 start 輸出，輸出取自子 workflow 的 end 輸入
 dynamic_ports: true

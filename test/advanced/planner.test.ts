@@ -1,14 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
-import { buildPlannerPrompt, mockPlanGenerator, planWorkflow } from '../src/planner.js';
-import { runWorkflow } from '../src/engine.js';
-import { demoRuntime } from '../src/demo/scenario.js';
-import { loadRegistry } from '../src/registry-fs.js';
-import type { WorkflowGraph } from '../src/types.js';
+import { buildPlannerPrompt, mockPlanGenerator, planWorkflow } from '../../src/planner.js';
+import { runWorkflow } from './adv.js';
+import { demoRuntime } from '../../src/demo/scenario.js';
+import { loadRegistry } from '../../src/registry-fs.js';
+import type { WorkflowGraph } from '../../src/types.js';
 
-const registry = loadRegistry(path.join(import.meta.dirname, '../registry/builtin'), path.join(import.meta.dirname, '../registry/agents'));
-const template: WorkflowGraph = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, '../workflows/fix-until-tests-pass.json'), 'utf8'));
+const registry = loadRegistry(path.join(import.meta.dirname, '../../registry/builtin'), path.join(import.meta.dirname, '../../registry/agents'));
+const template: WorkflowGraph = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, 'fixtures/fix-until-tests-pass.json'), 'utf8'));
 
 describe('Phase 4 planner (prototype)', () => {
   it('prompt 只列出 registry 節點，不洩漏 system prompt / tools', () => {

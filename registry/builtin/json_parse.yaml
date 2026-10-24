@@ -1,5 +1,6 @@
 name: json_parse
 kind: builtin
+tier: v1
 category: Utility
 description: 解析 JSON 字串（可從 ``` 區塊中擷取）；解析失敗走 failure
 inputs:

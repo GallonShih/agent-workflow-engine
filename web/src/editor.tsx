@@ -9,7 +9,22 @@ import { ControlSocket, TypedSocket, controlSocket } from '../../src/sockets.js'
 import { resolveNodePorts, type BodyPorts } from '../../src/compiler.js';
 import { typeLabel } from '../../src/schema.js';
 import type { NodeRegistry } from '../../src/registry.js';
-import type { Edge, NodeStatus, WorkflowGraph, WorkflowNode } from '../../src/types.js';
+import type { DataPortDef, Edge, NodeStatus, WorkflowGraph, WorkflowNode } from '../../src/types.js';
+
+/** 節點依資料相依排序（有環時其餘照原順序附在後面） */
+function topoOrder(g: WorkflowGraph): WorkflowNode[] {
+  const out: WorkflowNode[] = [];
+  const seen = new Set<string>();
+  const visit = (n: WorkflowNode, stack: Set<string>) => {
+    if (seen.has(n.id) || stack.has(n.id)) return;
+    stack.add(n.id);
+    for (const e of g.edges) if (e.to.node === n.id) { const s = g.nodes.find((x) => x.id === e.from.node); if (s) visit(s, stack); }
+    seen.add(n.id);
+    out.push(n);
+  };
+  for (const n of g.nodes) visit(n, new Set());
+  return out;
+}
 
 /**
  * Rete editor（area + connection + react render + auto-arrange 都是 Rete 官方 plugin）。
@@ -120,6 +135,8 @@ export interface LoadOptions {
   annotations?: Record<string, Record<string, string>>;
   /** 邊界節點的徽章文字：{ nodeId: '輸入邊界' } */
   boundaries?: Record<string, string>;
+  /** DSL v1：只有資料連線（不畫 control sockets），condition 的 true / false 是資料輸出 */
+  v1?: boolean;
 }
 
 export interface EditorApi {
@@ -156,6 +173,8 @@ export async function createEditor(container: HTMLElement, registry: NodeRegistr
   let opts: LoadOptions = {};
   let loading = false;
   let selected: string | null = null;
+  /** load 期間還沒有 Rete 連線可查，用來推斷 condition 輸出型別的 edges */
+  let loadEdges: Edge[] = [];
 
   AreaExtensions.selectableNodes(area, AreaExtensions.selector(), { accumulating: AreaExtensions.accumulateOnCtrl() });
   render.addPreset(
@@ -185,13 +204,22 @@ export async function createEditor(container: HTMLElement, registry: NodeRegistr
       const c = context.data;
       const src = editor.getNode(c.source)?.outputs[c.sourceOutput]?.socket;
       const dst = editor.getNode(c.target)?.inputs[c.targetInput]?.socket;
-      if (!src || !dst || !(src as TypedSocket | ControlSocket).isCompatibleWith(dst)) {
+      const srcNode = editor.getNode(c.source);
+      // v1：condition 還沒接 data 時輸出型別未定（{}）→ 先讓它連，型別由 compiler 驗證
+      const untypedPassThrough = opts.v1 && srcNode?.wf.type === 'condition' && src instanceof TypedSocket && Object.keys(src.schema).length === 0 && dst instanceof TypedSocket;
+      if (!src || !dst || (!untypedPassThrough && !(src as TypedSocket | ControlSocket).isCompatibleWith(dst))) {
         ev.log(`拒絕連線 ${c.source}.${String(c.sourceOutput).slice(2)} → ${c.target}.${String(c.targetInput).slice(2)}：型別或 edge kind 不相容（${src?.name} → ${dst?.name}）`, 'error');
         return;
       }
       c.kind = src instanceof ControlSocket ? 'control' : 'data';
     }
     if (!loading && ['connectioncreated', 'connectionremoved', 'nodecreated', 'noderemoved'].includes(context.type)) queueMicrotask(ev.onChange);
+    // v1：condition 的 data / value 連線變了 → 重建它，讓 true / false 的型別跟著上游
+    if (!loading && opts.v1 && (context.type === 'connectioncreated' || context.type === 'connectionremoved')) {
+      const c = context.data as Conn;
+      const t = editor.getNode(c.target);
+      if (t?.wf.type === 'condition' && ['d:data', 'd:value'].includes(String(c.targetInput))) queueMicrotask(() => void api.updateNode(t.wf));
+    }
     return context;
   });
 
@@ -218,10 +246,16 @@ export async function createEditor(container: HTMLElement, registry: NodeRegistr
 
   function buildNode(wf: WorkflowNode): UINode {
     const def = registry.get(wf.type);
-    if (!def) throw new Error(`unknown node type ${wf.type}`);
+    if (!def) {
+      // 未知型別也畫出來（沒有 port），錯誤交給 compiler 的 UNKNOWN_NODE_TYPE 診斷
+      const node = new UINode(wf, `${wf.label || wf.id}  ·  ⚠ ${wf.type}（未知型別）`);
+      node.height = 90;
+      return node;
+    }
     let ports;
     try {
-      ports = resolveNodePorts(wf, def, registry, bodyPorts);
+      ports = resolveNodePorts(wf, def, registry, bodyPorts, { v1: opts.v1 });
+      if (opts.v1 && wf.type === 'condition') ports = { ...ports, outputs: passThroughOutputs(wf, ports.outputs) };
     } catch (e) {
       ev.log(`${wf.id}: ${(e as Error).message}`, 'error');
       ports = { inputs: def.inputs, outputs: def.outputs, controlInputs: def.control_inputs, controlOutputs: def.control_outputs };
@@ -242,6 +276,17 @@ export async function createEditor(container: HTMLElement, registry: NodeRegistr
     node.height = 90 + rows * 44;
     if (Object.keys(ann).length) node.width = 420;
     return node;
+  }
+
+  /** condition 的 true / false 型別 = 接到 data（或 value）的上游輸出型別（與 compiler 的 inferPassThroughTypes 同規則） */
+  function passThroughOutputs(wf: WorkflowNode, outputs: Record<string, DataPortDef>): Record<string, DataPortDef> {
+    const edges = loading ? loadEdges : exportEdges();
+    const e = edges.find((x) => x.to.node === wf.id && x.to.port === 'data') ?? edges.find((x) => x.to.node === wf.id && x.to.port === 'value');
+    if (!e) return outputs;
+    const src = editor.getNode(e.from.node)?.outputs[`d:${e.from.port}`]?.socket;
+    const schema = src instanceof TypedSocket ? src.schema : undefined;
+    if (!schema) return outputs;
+    return { true: { schema, required: false }, false: { schema, required: false } };
   }
 
   async function addConn(e: Edge) {
@@ -276,7 +321,9 @@ export async function createEditor(container: HTMLElement, registry: NodeRegistr
         bodyPorts = o.body;
         selected = null;
         await clear();
-        for (const wf of graph.nodes) await editor.addNode(buildNode(wf));
+        loadEdges = graph.edges;
+        // 依上游順序建立節點，condition 才查得到上游 socket 的型別
+        for (const wf of topoOrder(graph)) await editor.addNode(buildNode(wf));
         for (const e of graph.edges) if (!(await addConn(e))) ev.log(`略過無法顯示的 edge ${e.from.node}.${e.from.port} → ${e.to.node}.${e.to.port}`, 'error');
         if (graph.nodes.length && graph.nodes.every((n) => n.ui)) {
           for (const n of graph.nodes) await area.translate(n.id, n.ui!);
@@ -299,7 +346,7 @@ export async function createEditor(container: HTMLElement, registry: NodeRegistr
       if (!def) return;
       let i = 1;
       while (editor.getNode(`${type}_${i}`)) i++;
-      const wf: WorkflowNode = { id: `${type}_${i}`, type, ...defaultsFor(type) };
+      const wf: WorkflowNode = { id: `${type}_${i}`, type, ...defaultsFor(type, opts.v1) };
       // 放在目前畫面中央
       const k = area.area.transform.k;
       const rect = container.getBoundingClientRect();
@@ -380,7 +427,8 @@ export async function createEditor(container: HTMLElement, registry: NodeRegistr
 }
 
 /** 新節點的預設 config / ports（讓剛拖進來的節點就是合法的） */
-export function defaultsFor(type: string): Partial<WorkflowNode> {
+export function defaultsFor(type: string, v1 = false): Partial<WorkflowNode> {
+  if (v1 && type === 'loop') return { config: { max_iterations: 3 }, ports: { inputs: {}, outputs: {} }, body: { nodes: [{ id: 'loop_in', type: 'loop_in' }, { id: 'loop_out', type: 'loop_out' }], edges: [] } };
   switch (type) {
     case 'condition': return { config: { rule: { op: 'truthy' } } };
     case 'join': return { config: { policy: 'all' } };

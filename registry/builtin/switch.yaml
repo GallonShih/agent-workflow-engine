@@ -1,5 +1,6 @@
 name: switch
 kind: builtin
+tier: advanced
 category: Logic
 description: 多路分支；依序比對 cases，第一個成立的 case（或全部成立的，match = all）觸發同名 control 輸出，都不成立走 default
 inputs:

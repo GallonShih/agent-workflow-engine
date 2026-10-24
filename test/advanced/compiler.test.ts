@@ -1,10 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { compileWorkflow } from '../src/compiler.js';
-import { isCompatible } from '../src/schema.js';
-import { TypedSocket, controlSocket } from '../src/sockets.js';
-import { ctl, data, n, registry, root, wf } from './helpers.js';
+import { compileWorkflow } from './adv.js';
+import { isCompatible } from '../../src/schema.js';
+import { TypedSocket, controlSocket } from '../../src/sockets.js';
+import { ctl, data, n, registry, root, wf } from '../helpers.js';
 
 const codes = (w: Parameters<typeof compileWorkflow>[0]) => compileWorkflow(w, registry()).errors.map((e) => e.code);
 
@@ -33,7 +33,7 @@ describe('schema compatibility (Ajv / JSON Schema)', () => {
 
 describe('graph compiler', () => {
   it('compiles the demo workflow without errors', () => {
-    const w = JSON.parse(fs.readFileSync(path.join(root, 'workflows/fix-until-tests-pass.json'), 'utf8'));
+    const w = JSON.parse(fs.readFileSync(path.join(root, 'test/advanced/fixtures/fix-until-tests-pass.json'), 'utf8'));
     const res = compileWorkflow(w, registry());
     expect(res.errors).toEqual([]);
     expect(res.graph!.nodes.get('fix_loop')!.body!.nodes.size).toBe(4);

@@ -66,13 +66,24 @@ export interface NodeDefinition {
   instance_overridable?: string[];
   /** 從哪個檔案載入（除錯用） */
   source?: string;
+  /**
+   * 分層：v1 = 預設可用的精簡節點；advanced = 需開啟 advanced 旗標；internal = 使用者不直接建立（loop_in / loop_out）。
+   * agent 節點預設 v1。
+   */
+  tier?: NodeTier;
 }
+
+export type NodeTier = 'v1' | 'advanced' | 'internal';
 
 export interface PortRef {
   node: string;
   port: string;
 }
 
+/**
+ * 內部（正規化後）的 edge。v1 檔案格式只有資料連線，可寫成字串 "a.port -> b.port"，
+ * 載入時（dsl.ts normalizeWorkflow）轉成 {kind:'data', from, to}；kind:'control' 只存在舊版（advanced）格式。
+ */
 export interface Edge {
   kind: 'data' | 'control';
   from: PortRef;
@@ -113,6 +124,8 @@ export interface WorkflowNode {
 }
 
 export interface WorkflowGraph {
+  /** 1 = v1 精簡 DSL（只有資料連線，執行順序由資料相依推導）；省略 = 舊版 hybrid（data + control edges，advanced） */
+  version?: 1;
   id?: string;
   name?: string;
   description?: string;

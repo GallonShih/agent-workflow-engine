@@ -130,6 +130,8 @@ export function PropertiesPanel(props: {
   onChange: (wf: WorkflowNode) => void;
   onDelete: () => void;
   onOpenBody?: () => void;
+  /** DSL v1：不顯示 data / control 節點的區分（v1 只有資料連線） */
+  v1?: boolean;
 }) {
   const { node, def, registry, ports } = props;
   const set = (patch: Partial<WorkflowNode>) => props.onChange({ ...node, ...patch });
@@ -142,7 +144,7 @@ export function PropertiesPanel(props: {
       <div style={{ padding: '10px 12px' }}>
         <div style={{ fontSize: 15, fontWeight: 700 }}>{node.label || node.id}</div>
         <div style={{ color: '#64748b' }}>
-          <code>{node.type}</code> · {def.category ?? (isAgent ? 'Agent Nodes' : 'Builtin')} · {def.mode === 'data' ? 'data 節點（lazy）' : 'control 節點'}
+          <code>{node.type}</code> · {def.category ?? (isAgent ? 'Agent Nodes' : 'Builtin')}{props.v1 ? '' : ` · ${def.mode === 'data' ? 'data 節點（lazy）' : 'control 節點'}`}
         </div>
         {def.description && <div style={{ marginTop: 4, color: '#334155' }}>{def.description}</div>}
       </div>

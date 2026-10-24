@@ -1,5 +1,6 @@
 name: end
 kind: builtin
+tier: v1
 category: Flow
 description: 終點；config.status = success | failed 決定整個 run 的結果；data 輸入會記錄成 run 的輸出
 dynamic_ports: true

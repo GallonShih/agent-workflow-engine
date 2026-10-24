@@ -3,12 +3,12 @@ import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { buildServer } from '../src/server/app.js';
-import type { NodeRunRecord, RunEvent } from '../src/types.js';
-import { root } from './helpers.js';
+import { buildServer } from '../../src/server/app.js';
+import type { NodeRunRecord, RunEvent } from '../../src/types.js';
+import { root } from '../helpers.js';
 
 const runsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wf-runs-'));
-const app = buildServer({ root, runsDir, mockDelayMs: 0 });
+const app = buildServer({ root, advanced: true, runsDir, mockDelayMs: 0, workflowsDir: path.join(root, 'test/advanced/fixtures') });
 let base = '';
 
 beforeAll(async () => {
@@ -47,7 +47,7 @@ describe('backend API (Fastify)', () => {
   });
 
   it('POST /api/validate returns diagnostics', async () => {
-    const wf = JSON.parse(fs.readFileSync(path.join(root, 'workflows/invalid-example.json'), 'utf8'));
+    const wf = JSON.parse(fs.readFileSync(path.join(root, 'test/advanced/fixtures/invalid-example.json'), 'utf8'));
     const r = (await app.inject({ method: 'POST', url: '/api/validate', payload: { workflow: wf } })).json();
     expect(r.ok).toBe(false);
     expect(r.errors.length).toBeGreaterThan(5);
@@ -116,8 +116,8 @@ describe('backend API (Fastify)', () => {
 
 describe('nested-review demo + workflow save (backend)', () => {
   const wfDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wf-dir-'));
-  for (const f of fs.readdirSync(path.join(root, 'workflows'))) fs.copyFileSync(path.join(root, 'workflows', f), path.join(wfDir, f));
-  const app2 = buildServer({ root, runsDir: fs.mkdtempSync(path.join(os.tmpdir(), 'wf-runs2-')), mockDelayMs: 0, workflowsDir: wfDir });
+  for (const f of fs.readdirSync(path.join(root, 'test/advanced/fixtures'))) fs.copyFileSync(path.join(root, 'test/advanced/fixtures', f), path.join(wfDir, f));
+  const app2 = buildServer({ root, advanced: true, runsDir: fs.mkdtempSync(path.join(os.tmpdir(), 'wf-runs2-')), mockDelayMs: 0, workflowsDir: wfDir });
   afterAll(() => app2.close());
 
   it('runs subflow + nested loops; run record keeps the subflow snapshot and outer#i/inner#j records', async () => {

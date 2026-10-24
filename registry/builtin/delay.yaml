@@ -1,5 +1,6 @@
 name: delay
 kind: builtin
+tier: advanced
 category: Utility
 description: 等待 config.ms 毫秒後繼續；value 原樣傳出
 inputs:

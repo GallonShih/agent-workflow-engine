@@ -27,7 +27,7 @@ export interface PlanResult {
 /** 給 LLM 看的 registry 目錄（只列名稱、說明、ports 型別；不含 system prompt / tools） */
 export function registryCatalog(registry: NodeRegistry): string {
   return registry
-    .list()
+    .list({ advanced: true })
     .map((d) => {
       const ins = Object.entries(d.inputs).map(([k, p]) => `${k}${p.required === false || p.default !== undefined ? '?' : ''}: ${typeLabel(p.schema)}`);
       const outs = Object.entries(d.outputs).map(([k, p]) => `${k}: ${typeLabel(p.schema)}`);
@@ -84,7 +84,7 @@ export async function planWorkflow(opts: { goal: string; registry: NodeRegistry;
       attempts.push({ attempt: i, raw, parseError: (e as Error).message, errors: [], warnings: [] });
       continue;
     }
-    const compiled = compileWorkflow(wf, opts.registry);
+    const compiled = compileWorkflow(wf, opts.registry, { advanced: true });
     attempts.push({ attempt: i, raw, errors: compiled.errors, warnings: compiled.warnings });
     if (compiled.ok) return { ok: true, workflow: wf, compiled, attempts };
   }

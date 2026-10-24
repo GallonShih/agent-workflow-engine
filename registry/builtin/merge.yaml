@@ -1,5 +1,6 @@
 name: merge
 kind: builtin
+tier: advanced
 mode: data
 category: Logic
 description: 合併多個 data 輸入（in_1..in_N，數量由 config.inputs 決定）；mode = array | object | first（第一個有值的，常用在分支匯流）
