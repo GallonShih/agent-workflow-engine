@@ -14,7 +14,8 @@ import { ctl, data, n, registry, wf } from '../helpers.js';
 
 const reg = registry();
 
-async function exec(w: WorkflowGraph, inputs: Record<string, unknown> = {}, services: RunServices = {}, runtime = new MockAgentRuntime()) {
+// stub HTTP server 在 127.0.0.1：預設允許私有位址；SSRF 測試另外傳 services
+async function exec(w: WorkflowGraph, inputs: Record<string, unknown> = {}, services: RunServices = { httpAllowPrivate: true }, runtime = new MockAgentRuntime()) {
   const c = compileWorkflow(w, reg);
   expect(c.errors).toEqual([]);
   const res = await runWorkflow(c.graph!, inputs, { runtime, runId: 'r', services });

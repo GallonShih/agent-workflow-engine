@@ -1,3 +1,4 @@
+import dns from 'node:dns/promises';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { RunServices, SandboxFs } from './services.js';
@@ -23,6 +24,8 @@ export function createSandboxFs(root: string): SandboxFs {
         break;
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+        // realpath 失敗但 lstat 成功 = 懸空 symlink（寫入會跟著它跑到沙盒外）
+        if (await fs.lstat(probe).then(() => true, () => false)) throw new Error(`path escapes sandbox via dangling symlink: ${rel}`);
         probe = path.dirname(probe);
       }
     }
@@ -50,11 +53,13 @@ export function createWorkflowLoader(dir: string) {
   };
 }
 
-export function nodeServices(opts: { root: string; registry: NodeRegistry; workspaceDir?: string; httpAllowHosts?: string[] }): RunServices {
+export function nodeServices(opts: { root: string; registry: NodeRegistry; workspaceDir?: string; httpAllowHosts?: string[]; httpAllowPrivate?: boolean }): RunServices {
   const allow = opts.httpAllowHosts ?? (process.env.HTTP_ALLOW_HOSTS ? process.env.HTTP_ALLOW_HOSTS.split(',').map((s) => s.trim()).filter(Boolean) : []);
   return {
     fetch: globalThis.fetch,
     httpAllowHosts: allow,
+    httpAllowPrivate: opts.httpAllowPrivate ?? process.env.HTTP_ALLOW_PRIVATE === '1',
+    resolveHost: async (host) => (await dns.lookup(host, { all: true })).map((a) => a.address),
     fs: createSandboxFs(opts.workspaceDir ?? path.join(opts.root, '.workspace')),
     loadWorkflow: createWorkflowLoader(path.join(opts.root, 'workflows')),
     registry: opts.registry,

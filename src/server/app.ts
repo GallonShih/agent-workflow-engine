@@ -40,6 +40,12 @@ export interface ServerOptions {
   advanced?: boolean;
   /** 提供 MCP Streamable HTTP endpoint（POST /mcp，stateless）。預設開啟 */
   mcp?: boolean;
+  /**
+   * 允許的 Host header（防 DNS rebinding：惡意網頁把自己的網域解析到 127.0.0.1 後呼叫本機 API / MCP）。
+   * 預設只允許 localhost / 127.0.0.1 / [::1]（任何 port）；false = 不檢查（綁 0.0.0.0 給其他機器用時，請改設實際 hostname）。
+   * 環境變數 ALLOWED_HOSTS=a.example,b.example 也可設定。
+   */
+  allowedHosts?: string[] | false;
 }
 
 interface ActiveRun {
@@ -61,6 +67,9 @@ interface StartBody {
   advanced?: boolean;
 }
 
+const WORKFLOW_ID = /^[A-Za-z0-9_-]+$/;
+const isPlainObject = (x: unknown): x is Record<string, unknown> => !!x && typeof x === 'object' && !Array.isArray(x);
+
 const MIME: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.json': 'application/json', '.wasm': 'application/wasm' };
 
 export function buildServer(opts: ServerOptions): FastifyInstance & { runs: Map<string, ActiveRun> } {
@@ -77,10 +86,23 @@ export function buildServer(opts: ServerOptions): FastifyInstance & { runs: Map<
   app.runs = runs;
 
   const readWorkflow = (id: string): WorkflowGraph | undefined => {
-    if (!/^[A-Za-z0-9_.-]+$/.test(id)) return undefined;
+    if (!WORKFLOW_ID.test(id.replace(/\.json$/, ''))) return undefined;
     const f = path.join(workflowsDir, `${id.replace(/\.json$/, '')}.json`);
-    return fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : undefined;
+    if (!fs.existsSync(f)) return undefined;
+    try {
+      return JSON.parse(fs.readFileSync(f, 'utf8'));
+    } catch {
+      return undefined; // 壞掉的 JSON 檔：當作不存在，而不是 500
+    }
   };
+
+  const hosts = opts.allowedHosts ?? (process.env.ALLOWED_HOSTS ? process.env.ALLOWED_HOSTS.split(',').map((h) => h.trim().toLowerCase()).filter(Boolean) : ['localhost', '127.0.0.1', '[::1]']);
+  if (hosts !== false) {
+    app.addHook('onRequest', async (req, reply) => {
+      const host = (req.headers.host ?? '').toLowerCase().replace(/:\d+$/, '');
+      if (!hosts.includes(host)) return reply.code(403).send({ error: `host "${req.headers.host ?? ''}" not allowed (set ALLOWED_HOSTS / allowedHosts)` });
+    });
+  }
   const writeWorkflow = (id: string, wf: WorkflowGraph) => {
     // v1 存成精簡格式（edges 字串）；舊格式原樣存
     const normalized = normalizeWorkflow(wf).graph;
@@ -94,9 +116,9 @@ export function buildServer(opts: ServerOptions): FastifyInstance & { runs: Map<
     if (!compiled.ok) return { error: { errors: compiled.errors, warnings: compiled.warnings } };
     const scenario = body.scenario ?? 'pass';
     const mock: AgentRuntime = demoRuntime({
-      passOnIteration: scenario === 'fail' ? null : (body.pass_on ?? 2),
+      passOnIteration: scenario === 'fail' ? null : Number(body.pass_on ?? 2) || 2,
       flakyCoder: true,
-      delayMs: body.mock_delay_ms ?? opts.mockDelayMs ?? 250,
+      delayMs: Math.min(Math.max(Number(body.mock_delay_ms ?? opts.mockDelayMs ?? 250) || 0, 0), 10_000),
     });
     const rt = resolveRuntimeMode(opts.runtime);
     const runId = `run_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
@@ -159,9 +181,9 @@ export function buildServer(opts: ServerOptions): FastifyInstance & { runs: Map<
       .readdirSync(workflowsDir)
       .filter((f) => f.endsWith('.json'))
       .sort()
-      .map((f) => {
-        const wf = JSON.parse(fs.readFileSync(path.join(workflowsDir, f), 'utf8')) as WorkflowGraph;
-        return { id: f.replace(/\.json$/, ''), name: wf.name, nodes: wf.nodes?.length ?? 0, version: isV1(wf) ? 1 : 0 };
+      .flatMap((f) => {
+        const wf = readWorkflow(f);
+        return wf ? [{ id: f.replace(/\.json$/, ''), name: wf.name, nodes: Array.isArray(wf.nodes) ? wf.nodes.length : 0, version: isV1(wf) ? 1 : 0 }] : [];
       }),
   );
 
@@ -176,9 +198,9 @@ export function buildServer(opts: ServerOptions): FastifyInstance & { runs: Map<
    */
   app.put<{ Params: { id: string }; Body: WorkflowGraph }>('/api/workflows/:id', async (req, reply) => {
     const id = req.params.id;
-    if (!/^[A-Za-z0-9_-]+$/.test(id)) return reply.code(400).send({ error: 'invalid workflow id' });
+    if (!WORKFLOW_ID.test(id) || id.length > 100) return reply.code(400).send({ error: 'invalid workflow id (letters, digits, _ and -)' });
     const wf = req.body;
-    if (!wf || !Array.isArray(wf.nodes) || !Array.isArray(wf.edges)) return reply.code(400).send({ error: 'body must be a workflow { nodes, edges }' });
+    if (!isPlainObject(wf) || !Array.isArray(wf.nodes) || !Array.isArray(wf.edges)) return reply.code(400).send({ error: 'body must be a workflow { nodes, edges }' });
     const r = compileWorkflow(wf, registry, { advanced: adv((req.query as { advanced?: string }).advanced) });
     if (!r.ok) return reply.code(422).send({ error: 'workflow has validation errors', errors: r.errors, warnings: r.warnings });
     writeWorkflow(id, wf);
@@ -186,13 +208,17 @@ export function buildServer(opts: ServerOptions): FastifyInstance & { runs: Map<
   });
 
   app.post<{ Body: { workflow?: WorkflowGraph; advanced?: boolean } }>('/api/validate', async (req, reply) => {
-    if (!req.body?.workflow) return reply.code(400).send({ error: 'body.workflow is required' });
+    if (!isPlainObject(req.body?.workflow)) return reply.code(400).send({ error: 'body.workflow (object) is required' });
     const r = compileWorkflow(req.body.workflow, registry, { advanced: adv(req.body.advanced) });
     return { ok: r.ok, errors: r.errors, warnings: r.warnings };
   });
 
   app.post<{ Body: StartBody }>('/api/runs', async (req, reply) => {
     const body = req.body ?? {};
+    if (typeof body !== 'object' || Array.isArray(body)) return reply.code(400).send({ error: 'body must be an object' });
+    if (body.workflow !== undefined && !isPlainObject(body.workflow)) return reply.code(400).send({ error: 'workflow must be an object' });
+    if (body.workflow_id !== undefined && typeof body.workflow_id !== 'string') return reply.code(400).send({ error: 'workflow_id must be a string' });
+    if (body.inputs !== undefined && !isPlainObject(body.inputs)) return reply.code(400).send({ error: 'inputs must be an object' });
     const wf = body.workflow ?? (body.workflow_id ? readWorkflow(body.workflow_id) : undefined);
     if (!wf) return reply.code(400).send({ error: 'workflow or a valid workflow_id is required' });
     const r = startRun(wf, body, { workflow_id: body.workflow_id });
@@ -245,6 +271,7 @@ export function buildServer(opts: ServerOptions): FastifyInstance & { runs: Map<
   });
 
   app.post<{ Params: { id: string } }>('/api/runs/:id/cancel', async (req, reply) => {
+    if (!RunStore.validId(req.params.id)) return reply.code(400).send({ error: 'invalid run id' });
     const active = runs.get(req.params.id);
     if (!active || active.meta.status !== 'running') return reply.code(409).send({ error: 'run is not running in this server' });
     active.ac.abort();
@@ -289,9 +316,15 @@ export function buildServer(opts: ServerOptions): FastifyInstance & { runs: Map<
   if (opts.staticDir && fs.existsSync(opts.staticDir)) {
     const base = path.resolve(opts.staticDir);
     app.get('/*', async (req, reply) => {
-      const url = decodeURIComponent((req.url.split('?')[0] || '/').replace(/^\/+/, ''));
+      let url: string;
+      try {
+        url = decodeURIComponent((req.url.split('?')[0] || '/').replace(/^\/+/, ''));
+      } catch {
+        return reply.code(400).send({ error: 'bad url' });
+      }
       let f = path.resolve(base, url || 'index.html');
-      if (!f.startsWith(base) || !fs.existsSync(f) || fs.statSync(f).isDirectory()) f = path.join(base, 'index.html');
+      // base + sep：避免 /dist-secret 這類同前綴的兄弟資料夾通過檢查
+      if (!f.startsWith(base + path.sep) || !fs.existsSync(f) || fs.statSync(f).isDirectory()) f = path.join(base, 'index.html');
       return reply.type(MIME[path.extname(f)] ?? 'application/octet-stream').send(fs.readFileSync(f));
     });
   }

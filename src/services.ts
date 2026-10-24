@@ -14,8 +14,12 @@ export interface SandboxFs {
 
 export interface RunServices {
   fetch?: typeof fetch;
-  /** 允許的 host（空 = 不限制）。例如 ['localhost', 'api.github.com'] */
+  /** 允許的 host（空 = 只擋私有位址，見 httpAllowPrivate）。例如 ['localhost', 'api.github.com'] */
   httpAllowHosts?: string[];
+  /** 沒有 allowlist 時預設擋 loopback / 私有 IP；true = 不擋（本機開發用） */
+  httpAllowPrivate?: boolean;
+  /** Node 端：DNS 解析 hostname，供私有 IP 檢查（見 net-policy.ts） */
+  resolveHost?: (host: string) => Promise<string[]>;
   fs?: SandboxFs;
   /** subflow 節點載入其他 workflow */
   loadWorkflow?: (id: string) => Promise<WorkflowGraph>;

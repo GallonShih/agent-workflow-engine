@@ -2,6 +2,7 @@ import jsonata from 'jsonata';
 import type { CompiledNode } from '../compiler.js';
 import { evalRule } from '../rules.js';
 import { assertValidSchema, validateValue } from '../schema.js';
+import { assertUrlAllowed } from '../net-policy.js';
 import type { RunServices } from '../services.js';
 import type { DataPortDef, JSONSchema, NodeRunRecord, Rule } from '../types.js';
 import { interpolateReferences } from '../vendor/circuit/orchestrator/references.js';
@@ -240,11 +241,10 @@ export const builtins: Record<string, BuiltinSpec> = {
       if (!doFetch) throw new Error('fetch is not available');
       const raw = (inputs.url as string | undefined) ?? (cfg.url ? interpolate(String(cfg.url), inputs) : '');
       if (!raw) throw new Error('no URL (connect the url input or set config.url)');
-      const url = new URL(raw);
-      if (!['http:', 'https:'].includes(url.protocol)) throw new Error(`protocol not allowed: ${url.protocol}`);
-      if (services.httpAllowHosts?.length && !services.httpAllowHosts.includes(url.hostname)) throw new Error(`host not in allowlist: ${url.hostname}`);
+      let url = new URL(raw);
+      await assertUrlAllowed(url, services);
       for (const [k, v] of Object.entries((inputs.query ?? {}) as Record<string, unknown>)) url.searchParams.set(k, String(v));
-      const method = String(cfg.method ?? 'GET');
+      let method = String(cfg.method ?? 'GET');
       const headers: Record<string, string> = { ...((cfg.headers ?? {}) as Record<string, string>), ...((inputs.headers ?? {}) as Record<string, string>) };
       let body: string | undefined;
       if (inputs.body !== undefined && method !== 'GET') {
@@ -258,7 +258,16 @@ export const builtins: Record<string, BuiltinSpec> = {
       const timer = setTimeout(() => ac.abort(), timeout);
       let res: Response;
       try {
-        res = await doFetch(url, { method, headers, body, signal: ac.signal });
+        // 自己跟 redirect，每一跳都重新檢查 allowlist / 私有 IP（避免 302 → 169.254.169.254）
+        for (let hop = 0; ; hop++) {
+          res = await doFetch(url, { method, headers, body, signal: ac.signal, redirect: 'manual' });
+          const loc = res.status >= 300 && res.status < 400 ? res.headers.get('location') : null;
+          if (!loc) break;
+          if (hop >= 5) throw new Error('too many redirects');
+          url = new URL(loc, url);
+          await assertUrlAllowed(url, services);
+          if (res.status === 303 || ((res.status === 301 || res.status === 302) && method === 'POST')) [method, body] = ['GET', undefined];
+        }
       } catch (e) {
         throw new Error(ac.signal.aborted && !signal.aborted ? `HTTP timeout after ${timeout}ms` : `HTTP request failed: ${(e as Error).message}`);
       } finally {

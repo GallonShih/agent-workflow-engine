@@ -1,6 +1,7 @@
 import type { CompiledNode, Ctx, Diagnostic } from './compiler.js';
 import { isCompatible, typeLabel } from './schema.js';
 import type { JSONSchema } from './types.js';
+import { RULE_OPS } from './rules.js';
 
 /**
  * 編譯錯誤的「可執行的修正建議」（Diagnostic.fix）。
@@ -30,6 +31,7 @@ export function levenshtein(a: string, b: string): number {
 }
 
 export function closest(name: string, candidates: string[]): string | undefined {
+  if (typeof name !== 'string') return undefined;
   let best: string | undefined;
   let score = Infinity;
   for (const c of candidates) {
@@ -60,7 +62,7 @@ function summarizeConfig(schema: JSONSchema | undefined, hide: string[] = []): s
 }
 
 const CONFIG_EXAMPLES: Record<string, string> = {
-  condition: '{"rule": {"op": "eq", "value": true}}  (ops: eq, neq, gt, gte, lt, lte, truthy, falsy, contains, is_empty, not_empty; optional "path": "a.b")',
+  condition: `{"rule": {"op": "eq", "value": true}}  (ops: ${RULE_OPS.join(', ')}; optional "path": "a.b")`,
   loop: '{"max_iterations": 3, "until": {"port": "passed", "op": "eq", "value": true}}',
   template: '{"template": "Summary: {{inputs.summary}}"}',
   transform: '{"expression": "items[price > 10].name"}',

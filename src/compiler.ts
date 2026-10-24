@@ -1,4 +1,4 @@
-import type { DataPortDef, Edge, LoopConfig, NodeDefinition, Rule, WorkflowGraph, WorkflowNode } from './types.js';
+import type { DataPortDef, Edge, LoopConfig, NodeDefinition, WorkflowGraph, WorkflowNode } from './types.js';
 import type { NodeRegistry } from './registry.js';
 import { isCompatible, typeLabel, validateValue } from './schema.js';
 import { evalRule } from './rules.js';
@@ -171,6 +171,30 @@ export function compileWorkflow(raw: WorkflowGraph | unknown, registry: NodeRegi
   return { ok: errors.length === 0, errors, warnings, graph: errors.length === 0 ? graph : undefined, workflow: wf };
 }
 
+const isObj = (x: unknown): x is Record<string, unknown> => !!x && typeof x === 'object' && !Array.isArray(x);
+
+/** 不信任的 JSON（API / MCP 傳入）：形狀不對的 node / edge 回報錯誤後丟掉，避免後續編譯 throw */
+function sanitizeShape(wf: WorkflowGraph, err: (code: string, message: string, extra?: Partial<Diagnostic>) => void): WorkflowGraph {
+  const nodes = wf.nodes.filter((n, i) => {
+    if (!isObj(n) || typeof n.id !== 'string' || typeof n.type !== 'string') {
+      err('INVALID_NODE', `nodes[${i}] must be an object with string "id" and "type"`, { fix: 'e.g. {"id": "planner", "type": "planner_agent", "config": {}}' });
+      return false;
+    }
+    if ((n.config !== undefined && n.config !== null && !isObj(n.config)) || (n.ports !== undefined && !isObj(n.ports))) {
+      err('INVALID_NODE', `node "${n.id}": "config" / "ports" must be objects`, { node: n.id });
+      return false;
+    }
+    return true;
+  });
+  const endpoint = (x: unknown) => isObj(x) && typeof x.node === 'string' && (x.port === undefined || typeof x.port === 'string');
+  const edges = wf.edges.filter((e, i) => {
+    if (isObj(e) && endpoint(e.from) && endpoint(e.to)) return true;
+    err('INVALID_EDGE', `edges[${i}] must be {from: {node, port}, to: {node, port}}`, { edge: i });
+    return false;
+  });
+  return nodes.length === wf.nodes.length && edges.length === wf.edges.length ? wf : { ...wf, nodes, edges };
+}
+
 export interface Ctx {
   registry: NodeRegistry;
   errors: Diagnostic[];
@@ -191,6 +215,7 @@ function compileGraph(wf: WorkflowGraph, ctx: Ctx, prefix: string, loop: BodyPor
     err('INVALID_WORKFLOW', 'workflow must have nodes[] and edges[]', { fix: 'A workflow is {"version": 1, "nodes": [{"id": "start", "type": "start", ...}], "edges": ["a.out -> b.in"]}.' });
     return { nodes, edges: [] };
   }
+  wf = sanitizeShape(wf, err);
   ctx.all.push({ prefix, nodes, edges: wf.edges });
 
   for (const n of wf.nodes) {
@@ -312,6 +337,14 @@ function compileGraph(wf: WorkflowGraph, ctx: Ctx, prefix: string, loop: BodyPor
 
 function checkLoopConfig(cn: CompiledNode, err: (c: string, m: string, x?: Partial<Diagnostic>) => void, ctx: Ctx) {
   const cfg = (cn.node.config ?? {}) as unknown as LoopConfig;
+  if (cfg.until !== undefined && (!isObj(cfg.until) || typeof cfg.until.port !== 'string')) {
+    err('INVALID_CONFIG', `loop "${cn.id}": until must be a rule object {port, op, value}`, { node: cn.id });
+    return;
+  }
+  if (cfg.carry !== undefined && (!Array.isArray(cfg.carry) || !cfg.carry.every((c) => isObj(c) && typeof c.from === 'string' && typeof c.to === 'string'))) {
+    err('INVALID_CONFIG', `loop "${cn.id}": carry must be an array of {from, to}`, { node: cn.id });
+    return;
+  }
   if (cfg.until) {
     if (!cn.outputs[cfg.until.port])
       err('INVALID_CONFIG', `loop "${cn.id}": until.port "${cfg.until.port}" is not a loop output`, { node: cn.id, fix: `until.port must be one of the loop outputs: ${Object.keys(cn.outputs).join(', ')}${closest(cfg.until.port, Object.keys(cn.outputs)) ? ` (did you mean "${closest(cfg.until.port, Object.keys(cn.outputs))}"?)` : ''}` });

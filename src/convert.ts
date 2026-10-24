@@ -1,6 +1,7 @@
 import type { Edge, LoopConfig, WorkflowGraph, WorkflowNode } from './types.js';
 import type { NodeRegistry } from './registry.js';
 import { serializeV1, isV1 } from './dsl.js';
+import { compileWorkflow } from './compiler.js';
 
 /**
  * 舊版 hybrid（data + control edges）→ Workflow DSL v1（只有資料連線）。
@@ -23,8 +24,12 @@ export interface ConvertResult {
   notes: string[];
 }
 
+const STRUCTURAL = ['INVALID_WORKFLOW', 'INVALID_NODE', 'INVALID_EDGE', 'DUPLICATE_NODE'];
+
 export function convertToV1(wf: WorkflowGraph, registry: NodeRegistry): ConvertResult {
   if (isV1(wf)) return { workflow: serializeV1(wf), notes: ['already v1'] };
+  const shape = compileWorkflow(wf, registry, { advanced: true }).errors.filter((e) => STRUCTURAL.includes(e.code));
+  if (shape.length) throw new Error(`cannot convert a malformed workflow:\n${shape.map((e) => `  ${e.code}: ${e.message}`).join('\n')}`);
   const notes: string[] = [];
   const graph = convertGraph(structuredClone(wf), registry, notes, '');
   return { workflow: serializeV1({ ...graph, version: 1 }), notes };
