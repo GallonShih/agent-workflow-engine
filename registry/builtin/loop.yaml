@@ -1,6 +1,34 @@
 name: loop
 kind: builtin
+category: Logic
 description: Loop composite node；body 子圖每一輪用全新的 Rete editor/engine 與 iteration scope 執行
 dynamic_ports: true
 control_inputs: [execute]
 control_outputs: [completed, done, exhausted, failure]
+config_schema:
+  type: object
+  properties:
+    max_iterations: {type: integer, minimum: 1, maximum: 100, default: 3, title: 最大輪數}
+    until:
+      type: object
+      title: 結束條件（對 loop_out 的 port 套規則）
+      properties:
+        port: {type: string, title: port}
+        op: {type: string, enum: [eq, neq, gt, gte, lt, lte, truthy, falsy, contains, is_empty, not_empty], title: 運算子}
+        value: {title: 比較值（JSON）}
+        path: {type: string, title: 欄位路徑}
+      required: [port, op]
+      additionalProperties: false
+    carry:
+      type: array
+      title: 帶到下一輪（輸出 → 輸入）
+      items:
+        type: object
+        properties:
+          from: {type: string, title: loop 輸出}
+          to: {type: string, title: loop 輸入}
+        required: [from, to]
+        additionalProperties: false
+    on_body_failure: {type: string, enum: [fail, continue], default: fail, title: body 失敗時}
+  required: [max_iterations]
+  additionalProperties: false

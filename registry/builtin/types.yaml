@@ -1,0 +1,16 @@
+# builtin 節點共用的具名型別（config_schema 用 $type 引用）
+Rule:
+  type: object
+  title: Rule
+  properties:
+    op:
+      type: string
+      title: 運算子
+      enum: [eq, neq, gt, gte, lt, lte, truthy, falsy, contains, is_empty, not_empty]
+    value:
+      title: 比較值（JSON）
+    path:
+      type: string
+      title: 欄位路徑（例如 summary.passed）
+  required: [op]
+  additionalProperties: false

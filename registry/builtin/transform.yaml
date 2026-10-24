@@ -1,0 +1,16 @@
+name: transform
+kind: builtin
+category: Logic
+description: 用 JSONata 表達式轉換資料（安全的查詢 / 轉換語言，不執行任意程式碼）；$input 也可直接用欄位名稱
+inputs:
+  input: {}
+outputs:
+  result: {}
+output_overrides: [result]
+config_schema:
+  type: object
+  properties:
+    expression: {type: string, format: textarea, title: JSONata 表達式, examples: ['items[price > 10].name']}
+    timeout_ms: {type: integer, minimum: 10, maximum: 10000, default: 1000, title: 逾時（ms）}
+  required: [expression]
+  additionalProperties: false

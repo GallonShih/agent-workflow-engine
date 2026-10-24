@@ -1,0 +1,13 @@
+name: subflow
+kind: builtin
+category: Flow
+description: 執行另一個已存的 workflow（workflows/<id>.json）；輸入對應子 workflow 的 start 輸出，輸出取自子 workflow 的 end 輸入
+dynamic_ports: true
+control_inputs: [execute]
+control_outputs: [success, failure]
+config_schema:
+  type: object
+  properties:
+    workflow: {type: string, title: Workflow ID}
+  required: [workflow]
+  additionalProperties: false

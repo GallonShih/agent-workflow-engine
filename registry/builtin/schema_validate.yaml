@@ -1,0 +1,18 @@
+name: schema_validate
+kind: builtin
+category: Utility
+description: 用 JSON Schema（Ajv）驗證輸入；通過走 valid、不通過走 invalid；value 輸出的型別就是 config.schema
+inputs:
+  value: {}
+outputs:
+  value: {schema: {}, required: false}
+  is_valid: {type: boolean}
+  errors: {type: array, items: {type: string}}
+control_inputs: [execute]
+control_outputs: [valid, invalid]
+config_schema:
+  type: object
+  properties:
+    schema: {type: object, title: JSON Schema}
+  required: [schema]
+  additionalProperties: false

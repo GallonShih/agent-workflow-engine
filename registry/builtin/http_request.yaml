@@ -1,0 +1,25 @@
+name: http_request
+kind: builtin
+category: Utility
+description: 呼叫 HTTP API（只允許 http/https，有逾時）；URL 可用 {{inputs.x}}；非 2xx 走 failure（fail_on_http_error = false 時照樣 success）
+inputs:
+  url: {schema: {type: string}, required: false}
+  body: {schema: {}, required: false}
+  headers: {schema: {type: object}, required: false}
+  query: {schema: {type: object}, required: false}
+outputs:
+  status: {type: integer}
+  ok: {type: boolean}
+  body: {}
+  headers: {type: object}
+output_overrides: [body]
+config_schema:
+  type: object
+  properties:
+    method: {type: string, enum: [GET, POST, PUT, PATCH, DELETE], default: GET, title: Method}
+    url: {type: string, title: URL（沒接 url 輸入時使用）}
+    headers: {type: object, title: Headers}
+    timeout_ms: {type: integer, minimum: 100, maximum: 120000, default: 10000, title: 逾時（ms）}
+    response_type: {type: string, enum: [auto, json, text], default: auto, title: 回應格式}
+    fail_on_http_error: {type: boolean, default: true, title: 非 2xx 視為失敗}
+  additionalProperties: false

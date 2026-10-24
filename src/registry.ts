@@ -31,6 +31,14 @@ export class NodeRegistry {
       source,
     };
     if (def.kind === 'agent' && !def.runtime) throw new Error(`${source}: agent node needs "runtime"`);
+    if (def.kind === 'agent') {
+      def.instance_overridable ??= ['max_turns', 'timeout_seconds', 'retry'];
+      def.config_schema ??= agentConfigSchema(def);
+    }
+    if (def.config_schema) {
+      def.config_schema = this.resolveTypes(def.config_schema, `${source}#config_schema`);
+      assertValidSchema(def.config_schema, `${source}#config_schema`);
+    }
     const dup = [...Object.keys(def.inputs), ...Object.keys(def.outputs)].filter((k) => def.control_inputs.includes(k) || def.control_outputs.includes(k));
     if (dup.length) throw new Error(`${source}: port names used for both data and control: ${dup.join(', ')}`);
     this.defs.set(def.name, def);
@@ -72,3 +80,27 @@ export class NodeRegistry {
   }
 }
 
+
+/** Agent 節點實例可調整的欄位（預設值取自 registry 的 config）；model / tools / MCP / skills 不在其中 */
+function agentConfigSchema(def: NodeDefinition): JSONSchema {
+  const all: Record<string, JSONSchema> = {
+    max_turns: { type: 'integer', minimum: 1, maximum: 200, title: '最大回合數', default: def.config?.max_turns },
+    timeout_seconds: { type: 'number', exclusiveMinimum: 0, maximum: 3600, title: '逾時（秒）', default: def.config?.timeout_seconds },
+    retry: {
+      type: 'object',
+      title: '重試',
+      properties: {
+        max_attempts: { type: 'integer', minimum: 1, maximum: 10, title: '最多嘗試次數', default: def.config?.retry?.max_attempts ?? 1 },
+        backoff_ms: { type: 'integer', minimum: 0, maximum: 60000, title: '間隔（ms）', default: def.config?.retry?.backoff_ms ?? 0 },
+      },
+      required: ['max_attempts'],
+      additionalProperties: false,
+    },
+  };
+  const allowed = def.instance_overridable ?? [];
+  return JSON.parse(JSON.stringify({
+    type: 'object',
+    properties: Object.fromEntries(Object.entries(all).filter(([k]) => allowed.includes(k))),
+    additionalProperties: false,
+  }));
+}

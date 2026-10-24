@@ -1,0 +1,14 @@
+name: json_parse
+kind: builtin
+category: Utility
+description: 解析 JSON 字串（可從 ``` 區塊中擷取）；解析失敗走 failure
+inputs:
+  text: {type: string}
+outputs:
+  value: {}
+output_overrides: [value]
+config_schema:
+  type: object
+  properties:
+    extract_code_block: {type: boolean, default: true, title: 自動擷取 ```json 區塊}
+  additionalProperties: false

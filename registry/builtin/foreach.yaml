@@ -1,0 +1,15 @@
+name: foreach
+kind: builtin
+category: Logic
+description: 對 items 每個元素依序執行 body 子圖（loop_in 提供 item / index，loop_out 的每個輸入收集成陣列輸出）；每個元素是獨立的 iteration scope
+dynamic_ports: true
+inputs:
+  items: {type: array}
+control_inputs: [execute]
+control_outputs: [success, failure]
+config_schema:
+  type: object
+  properties:
+    max_items: {type: integer, minimum: 1, maximum: 1000, default: 100, title: 最多元素數}
+    on_item_failure: {type: string, enum: [fail, skip], default: fail, title: 單一元素失敗時}
+  additionalProperties: false

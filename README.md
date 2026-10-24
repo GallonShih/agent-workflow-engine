@@ -9,22 +9,81 @@ Claude 執行層沿用 **Circuit** 的 `ClaudeAgent` adapter 與 `{{ }}` referen
 ## 快速開始
 
 ```bash
-npm install
-npm test                 # vitest：4 個檔案 30 個測試
-npm run typecheck        # tsc strict
-npm run demo             # planning → coding → testing → condition → 重試 (<3 輪) ，mock agents，第 3 輪通過
-npm run demo -- --scenario fail --no-flaky   # 3 輪都失敗 → loop exhausted → FAILED 路徑
-npm run demo -- --pass-on 0                  # 第 1 輪就通過（提早結束）
-npm run validate -- workflows/invalid-example.json   # compiler 列出 14 個錯誤
-npm run plan             # Phase 4 雛形：mock planner → compiler 擋下 → 修正 → 執行
+npm install && npm --prefix web install
+npm test                 # vitest：6 個檔案 56 個測試
+npm run typecheck        # tsc strict（根目錄）；前端：cd web && npx tsc -p .
 
-cd web && npm install && npm run dev   # Phase 1 前端 Rete editor（http://localhost:5173）
-npm run web:build                      # 或在根目錄 build 前端
+# 開發模式：後端（Fastify, :3001）+ Vite（:5173，/api proxy 到後端）
+npm run server           # 終端機 1
+npm run web:dev          # 終端機 2 → http://localhost:5173
+#   或一行：npm run dev
+
+# 單一 process：build 前端後由後端直接提供 web/dist
+npm start                # → http://127.0.0.1:3001
+
+npm run demo             # CLI：planning → coding → testing → condition → 重試，mock agents，第 3 輪通過
+npm run demo -- --scenario fail --no-flaky   # 3 輪都失敗 → loop exhausted → FAILED 路徑
+npm run validate -- workflows/invalid-example.json   # compiler 列出 14 個錯誤、2 個警告
+npm run plan             # Phase 4 雛形：mock planner → compiler 擋下 → 修正 → 執行
 ```
 
-Demo 每次執行會寫出 `.runs/<run_id>.events.jsonl` 與 `.runs/<run_id>.records.json`（key = `run_id/scope/node_id`，例如 `run_x/fix_loop#1/coder`）。
+後端參數：`npm run server -- --port 3001 --host 127.0.0.1 --mock-delay 250 --runtime mock|claude`。
 
-有設定 `ANTHROPIC_API_KEY` 且沒加 `--mock` 時，`runtime: claude_agent_sdk` 的節點會改走真的 Claude Agent SDK（**尚未用真 key 驗證過**，目前只有 fake query 的單元測試）。
+- **Runtime 預設是 mock。** 只有 `--runtime claude`（或 `AGENT_RUNTIME=claude`）**而且**有 `ANTHROPIC_API_KEY` 時才會走 Circuit 的 Claude adapter；否則一律 mock（`GET /api/health` 會回報原因）。Claude 路徑**尚未用真 key 驗證過**。
+- `HTTP_ALLOW_HOSTS=api.example.com,localhost`：HTTP Request 節點的主機白名單（未設定 = 不限制，只允許 http/https）。
+- 檔案節點只能讀寫 `.workspace/`（沙盒；擋絕對路徑、`..`、symlink 逃逸）。
+- 每次執行都寫進 `.runs/`：`<run_id>.meta.json`、`.workflow.json`、`.events.jsonl`（即時 append）、`.records.json`（key = `run_id/scope/node_id`，例如 `run_x/fix_loop#1/coder`）。後端重啟後，未結束的 run 會顯示為 `interrupted`。
+
+## 後端 API（`src/server/app.ts`）
+
+| Method | Path | 說明 |
+|---|---|---|
+| GET | `/api/health` | 狀態 + 目前 runtime（mode / reason）+ registry 節點數 |
+| GET | `/api/registry` | 全部節點定義（含 config_schema、instance_overridable、output_overrides） |
+| GET | `/api/workflows`、`/api/workflows/:id` | `workflows/*.json` |
+| POST | `/api/validate` | `{workflow}` → compiler 的 errors / warnings |
+| POST | `/api/runs` | `{workflow \| workflow_id, inputs, scenario, pass_on, mock_delay_ms}` → `202 {run_id}`；編譯失敗回 `422` |
+| GET | `/api/runs`、`/api/runs/:id` | 執行紀錄列表；單一 run 的 meta + workflow + events + records |
+| GET | `/api/runs/:id/events` | SSE（`event: run`、`id: seq`）；支援 `?after=` / `Last-Event-ID`，先補發歷史再即時推送，結束時送 `event: end` |
+| POST | `/api/runs/:id/cancel` | 取消執行中的 run（AbortSignal 傳到 agent / HTTP / delay） |
+| POST | `/api/runs/:id/resume` | 以同一份 workflow 重跑，**已成功的 agent 節點沿用上次輸出**（依 scope/node_id 對應），其餘重新執行 |
+
+## Web UI
+
+- **節點屬性面板（右側「屬性」）**：Label、依 `config_schema` 自動產生的設定表單；Agent 節點的 runtime / model / prompt / allowed tools / MCP / skills 以 🔒 唯讀顯示，只有 `max_turns`、`timeout_seconds`、`retry` 可改；動態 ports（start / end / set / template / loop / foreach / subflow）可新增、刪除、改型別；`output_overrides` 可收窄 any 型別輸出；解析後的 ports 與型別表。修改即時反映到畫布與 Workflow JSON，並 debounce 重新驗證，錯誤以紅色 badge 標在節點上。
+- **執行監控（右側「執行監控」）**：Backend 模式透過 SSE 即時上色（running 會脈動）；點節點看 Status / Input / Output / Agent Events / Duration / Tokens / Attempts / Retries；Loop、Foreach 節點有 iteration 選擇器，畫布上方可切換 body 子圖與 iteration。
+- **執行紀錄（左側）**：列出 `.runs/` 的所有 run，可開啟、用時間軸滑桿 replay 事件、Resume、取消。
+- **瀏覽器內模式**：沒有後端時改在瀏覽器裡跑同一份 engine（file / subflow 節點不可用）。
+
+截圖（headless Chrome 實測，`screenshots/`）：
+`01-editor-properties-agent.png`（屬性面板）、`02-editor-validation-errors.png`（INVALID_CONFIG badge）、`03-monitor-running.png`、`04-monitor-completed-loop-body.png`（loop body + iteration 選擇器）、`05-monitor-completed-run.png`（完成的 run）、`06-history-replay.png`、`07-resume.png`。
+
+## 節點目錄（`registry/`）
+
+| 節點 | 類別 | 觸發 | 主要 ports | 設定 | 說明 |
+|---|---|---|---|---|---|
+| start | Flow | control | 動態輸出 → `success` | — | 入口；輸出 = run inputs |
+| end | Flow | control | 動態輸入 | `status` | 終點；決定 run 成功 / 失敗，輸入記為 run 輸出 |
+| subflow | Flow | control | 動態輸入 / 輸出；`success`/`failure` | `workflow` | 執行 `workflows/<id>.json`（僅後端 / CLI；最多 8 層） |
+| condition | Logic | control | `value` → `true`/`false` | `rule` | 規則判斷分支 |
+| switch | Logic | control | `value` → 各 case / `default`；輸出 `value`,`matched` | `cases`,`match` | 多路分支（first / all） |
+| loop | Logic | control | 動態；`completed`/`done`/`exhausted`/`failure` | `max_iterations`,`until`,`carry`,`on_body_failure` | composite；每輪全新 GraphRun |
+| foreach | Logic | control | `items` + 動態 → 每個輸出收集成陣列 + `count` | `max_items`,`on_item_failure` | 每個元素一個 iteration scope |
+| join | Logic | control | `in`（或 `in_1..N`）→ `success` | `policy`,`inputs` | all / any 同步 |
+| merge | Logic | data | `in_1..N` → `merged` | `inputs`,`mode` | array / object / first |
+| transform | Logic | control | `input` → `result` | `expression`,`timeout_ms` | JSONata（不執行任意程式碼） |
+| set | Data | data | 動態輸出 | `values` | 常數 |
+| template | Data | data | 動態輸入 → `text` | `template` | `{{inputs.x}}` 組字串 |
+| filter | Data | control | `items` → `items`,`rejected`,`count` | `rule` | 依規則過濾陣列 |
+| http_request | Utility | control | `url`,`body`,`headers`,`query` → `status`,`ok`,`body`,`headers` | `method`,`url`,`headers`,`timeout_ms`,`response_type`,`fail_on_http_error` | 只允許 http/https；非 2xx 走 failure |
+| json_parse | Utility | control | `text` → `value` | `extract_code_block` | 可從 ``` 區塊擷取 |
+| schema_validate | Utility | control | `value` → `value`,`is_valid`,`errors`；`valid`/`invalid` | `schema` | Ajv |
+| delay | Utility | control | `value` → `value` | `ms` | 可被取消 |
+| log | Utility | control | `message` → `value` | `level`,`label` | 寫入監控的 log 事件 |
+| file_read | IO | control | `path` → `content`,`path`,`bytes` | `path`,`format` | 沙盒 `.workspace/`（僅後端 / CLI） |
+| file_write | IO | control | `content`,`path` → `path`,`bytes` | `path`,`format`,`mode` | 同上 |
+| loop_in / loop_out | （body） | — | 由 loop / foreach 決定 | — | body 子圖的出入口 |
+| planning / coding / testing / risk_review / report_agent | Agent | control | 見 YAML；`success`/`failure` | `max_turns`,`timeout_seconds`,`retry` | mock 或 Claude（policy 欄位不可覆寫） |
 
 ## 架構
 
@@ -59,7 +118,8 @@ workflow JSON ◄── Rete editor (web/) ────┘ 同一份 compiler、
 | `ajv` | JSON Schema 驗證（常數、輸入、輸出、範例） |
 | Circuit `agents/base.ts`、`agents/claude.ts` | Claude Agent SDK adapter（3 處標記 `PoC patch`：可注入 queryFn、輸出 usage 事件、debug log） |
 | Circuit `orchestrator/references.ts` | `{{inputs.x}}` prompt 插值 |
-| 自己寫（glue） | `registry.ts`、`compiler.ts`、`schema.ts#isCompatible`、`engine.ts`（hybrid 語意、loop、join、skip、retry/timeout、紀錄）、`runtime/*`、`planner.ts`、`web/src/*` |
+| `fastify`、`jsonata` | 薄後端 / SSE；Transform 節點的表達式語言 |
+| 自己寫（glue） | `registry.ts`、`compiler.ts`、`schema.ts#isCompatible`、`engine.ts`（hybrid 語意、loop / foreach / subflow、join、skip、retry/timeout、resume、紀錄）、`nodes/builtins.ts`、`server/*`、`runtime/*`、`planner.ts`、`web/src/*` |
 
 設計參考（未複製程式碼）：Circuit `orchestrator/engine.ts`（ready nodes、inactive branch）、Rivet `LoopUntilNode` / `LoopControllerNode`、Google ADK `_join_node.py` / `_retry_config.py`。
 
@@ -67,18 +127,22 @@ workflow JSON ◄── Rete editor (web/) ────┘ 同一份 compiler、
 
 | Phase | 內容 | 狀態 |
 |---|---|---|
-| 1 | typed multi-port、fan-out、Ajv schema 驗證、compiler、Rete 前端 editor（連線型別檢查、驗證、存檔/載入 JSON、localStorage、從 registry 新增節點、loop body 檢視、mock run 狀態上色） | ✅ 完成（前端以 headless Chrome 實測載入 / 拒絕不相容連線 / 存檔 / mock run） |
-| 2 | hybrid dataflow + control flow、Condition、Join、Loop（max_iterations、until、carry、per-iteration context）、failure port、dead-path skip、run_id+node_id+iteration 監控 | ✅ 完成（測試 + demo） |
-| 3 | AgentRuntime 介面、mock runtime、Circuit Claude adapter、retry/timeout、output schema 驗證、token 統計 | 🟡 部分：mock 完整；Claude 路徑只用 fake query 測過（沒有 API key）；MCP 設定檔載入、真正的 skills 掛載尚未做（skills 目前只寫進 system prompt） |
-| 4 | Planner：registry catalog prompt → 產生 workflow JSON → compiler 閘門 → 帶錯誤修正 | 🟡 雛形：流程與測試完成，但生成器是 mock；真 LLM generator 尚未接 |
+| 1 | typed multi-port、Ajv、compiler、Rete editor、**節點屬性面板**（schema 表單、動態 ports、即時驗證 badge） | ✅ 完成（headless Chrome 實測） |
+| 2 | hybrid dataflow + control flow、Condition / Switch / Join / Merge / Loop / Foreach、dead-path skip、監控 key | ✅ 完成（測試 + demo） |
+| 2.5 | 常用節點：Transform（JSONata）、HTTP、JSON Parser、Schema Validator、Template、Set、Delay、Filter、Log、檔案讀寫、Sub-workflow | ✅ 完成（`test/nodes.test.ts` 19 個測試，HTTP 用本機 stub server） |
+| 3 | AgentRuntime、mock runtime、Circuit Claude adapter、retry/timeout、token 統計 | 🟡 部分：mock 完整；Claude 只用 fake query 測過（沒有 API key）；MCP / skills 掛載尚未做 |
+| 3.5 | 薄後端（Fastify）+ 執行監控：SSE、`.runs/` 持久化、執行紀錄、replay、cancel、resume | ✅ 完成（`test/server.test.ts` 6 個測試 + 瀏覽器實測） |
+| 4 | Planner：catalog prompt → workflow JSON → compiler 閘門 → 修正 | 🟡 雛形：生成器是 mock |
 
 ### 尚未做 / 已知限制
 
-- 前端沒有 node 屬性編輯面板（config、dynamic ports 要改 JSON）；沒有 loop body 巢狀顯示（用下拉切換 body）。
-- 執行監控只有前端 log 與 `.runs/*.jsonl`；沒有後端 API / WebSocket / 持久化 DB。
-- 前端的 mock run 在瀏覽器內執行（同一份 engine），不是呼叫後端。
-- Loop 不支援巢狀 loop 的 UI；engine 層理論上可遞迴但沒測。
-- 沒有 sandbox / git worktree 隔離真實 coding agent。
+- Claude runtime 沒有用真 API key 跑過；MCP 設定檔載入、skills 實際掛載未做。
+- 編輯器一次只顯示一層：body 子圖用下拉切換，巢狀 loop / foreach 的 UI 只支援一層；subflow 不能在畫布上展開。
+- 瀏覽器內模式沒有檔案系統與 workflow loader（file_* / subflow 節點會失敗），也沒有執行紀錄。
+- Resume 只沿用成功的 **agent** 節點輸出；builtin 節點一律重跑（HTTP 等有副作用的節點要注意）。
+- HTTP 白名單未設定時不限制主機，也沒有阻擋內網 IP（SSRF）；正式環境務必設定 `HTTP_ALLOW_HOSTS`。
+- `.runs/` 是 JSON 檔，沒有 DB、沒有驗證 / 多使用者；後端預設只聽 127.0.0.1。
+- 沒有 git worktree / container 隔離真實 coding agent。
 
 ## 目錄
 
@@ -87,7 +151,10 @@ src/            核心（registry、compiler、schema、sockets、engine、plann
 src/vendor/circuit/   vendored Circuit 程式碼（LICENSE、UPSTREAM_COMMIT）
 registry/       builtin 與 agent 節點定義（YAML）、types.yaml 具名型別
 workflows/      fix-until-tests-pass.json（demo）、invalid-example.json
-scripts/        run-demo.ts、validate.ts、plan-demo.ts
+src/nodes/      builtin 節點的 check / execute / compute
+src/server/     Fastify app、RunStore（.runs/）
+scripts/        server.ts、run-demo.ts、validate.ts、plan-demo.ts
+screenshots/    headless Chrome 截圖
 test/           vitest
-web/            Phase 1 Rete editor（Vite + React）
+web/            Rete editor + 屬性面板 + 執行監控（Vite + React）
 ```

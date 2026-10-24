@@ -35,3 +35,21 @@ describe('Claude Agent SDK adapter (vendored Circuit ClaudeAgent, fake query)', 
     await expect(rt.run({ def: registry().get('testing_agent')!, nodeId: 't', inputs: {}, prompt: '', iteration: null, attempt: 1, scope: [], signal: new AbortController().signal, workingDirectory: '/tmp', outputSchema: {} })).rejects.toThrow(/max turns/);
   });
 });
+
+describe('runtime selection', () => {
+  it('defaults to mock; claude only with explicit opt-in AND an API key', async () => {
+    const { resolveRuntimeMode } = await import('../src/runtime/select.js');
+    const saved = { key: process.env.ANTHROPIC_API_KEY, rt: process.env.AGENT_RUNTIME };
+    try {
+      delete process.env.AGENT_RUNTIME;
+      process.env.ANTHROPIC_API_KEY = 'sk-test';
+      expect(resolveRuntimeMode().mode).toBe('mock');
+      expect(resolveRuntimeMode('claude').mode).toBe('claude');
+      delete process.env.ANTHROPIC_API_KEY;
+      expect(resolveRuntimeMode('claude')).toMatchObject({ mode: 'mock', reason: expect.stringContaining('ANTHROPIC_API_KEY is not set') });
+    } finally {
+      if (saved.key === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = saved.key;
+      if (saved.rt !== undefined) process.env.AGENT_RUNTIME = saved.rt;
+    }
+  });
+});

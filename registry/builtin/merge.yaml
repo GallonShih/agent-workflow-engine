@@ -1,0 +1,15 @@
+name: merge
+kind: builtin
+mode: data
+category: Logic
+description: 合併多個 data 輸入（in_1..in_N，數量由 config.inputs 決定）；mode = array | object | first（第一個有值的，常用在分支匯流）
+inputs: {}
+outputs:
+  merged: {}
+output_overrides: [merged]
+config_schema:
+  type: object
+  properties:
+    inputs: {type: integer, minimum: 2, maximum: 10, default: 2, title: 輸入數量}
+    mode: {type: string, enum: [array, object, first], default: array, title: 合併方式}
+  additionalProperties: false

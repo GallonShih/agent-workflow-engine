@@ -1,0 +1,12 @@
+name: set
+kind: builtin
+category: Data
+mode: data
+description: 常數 / 設定值（純資料節點）；ports.outputs 宣告輸出型別，config.values 給值
+dynamic_ports: true
+config_schema:
+  type: object
+  properties:
+    values: {type: object, title: 輸出值（依 port 名稱）}
+  required: [values]
+  additionalProperties: false

@@ -56,8 +56,14 @@ export interface NodeDefinition {
   outputs: Record<string, DataPortDef>;
   control_inputs: string[];
   control_outputs: string[];
-  /** 是否允許 workflow 實例在 node.ports 動態宣告 port（Loop 用） */
+  /** 是否允許 workflow 實例在 node.ports 動態宣告 port（start / end / loop / foreach / set ...） */
   dynamic_ports?: boolean;
+  /** 允許實例用 node.ports.outputs.<name> 收窄型別的 any 輸出（例如 transform.result、http_request.body） */
+  output_overrides?: string[];
+  /** 節點實例 config 的 JSON Schema：compiler 用 Ajv 驗證、前端屬性面板依此產生表單 */
+  config_schema?: JSONSchema;
+  /** agent：實例可以覆寫的 config 欄位（預設 max_turns / timeout_seconds / retry）；權限欄位永遠不行 */
+  instance_overridable?: string[];
   /** 從哪個檔案載入（除錯用） */
   source?: string;
 }
@@ -143,6 +149,8 @@ export interface NodeRunRecord {
   token_usage?: TokenUsage;
   runtime?: string;
   agent_events?: AgentEvent[];
+  /** resume 時沿用先前 run 的結果、沒有重新執行 */
+  resumed_from?: string;
 }
 
 // Agent 事件格式直接沿用 Circuit（src/vendor/circuit/workflows/types.ts）
@@ -165,7 +173,8 @@ export interface RunEvent {
     | 'control_fired'
     | 'agent_event'
     | 'loop_iteration_started'
-    | 'loop_iteration_completed';
+    | 'loop_iteration_completed'
+    | 'log';
   node_id?: string;
   key?: string;
   scope?: Scope;

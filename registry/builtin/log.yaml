@@ -1,0 +1,15 @@
+name: log
+kind: builtin
+category: Utility
+description: 把 message 寫進執行紀錄（Execution Monitor 的 log 事件）；value 原樣傳出
+inputs:
+  message: {}
+outputs:
+  value: {}
+output_overrides: [value]
+config_schema:
+  type: object
+  properties:
+    level: {type: string, enum: [info, warn, error], default: info, title: 層級}
+    label: {type: string, title: 標籤}
+  additionalProperties: false

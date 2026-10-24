@@ -1,7 +1,14 @@
 name: template
 kind: builtin
+category: Data
 mode: data
-description: 純資料節點（lazy pull）；用 {{inputs.port}} 組字串
+description: 純資料節點（lazy pull）；用 {{inputs.port}} 組字串，輸入 ports 動態宣告
 dynamic_ports: true
 outputs:
   text: {type: string}
+config_schema:
+  type: object
+  properties:
+    template: {type: string, format: textarea, title: 樣板}
+  required: [template]
+  additionalProperties: false

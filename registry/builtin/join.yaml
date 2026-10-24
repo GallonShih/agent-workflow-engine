@@ -1,5 +1,12 @@
 name: join
 kind: builtin
-description: 同步多條平行分支；config.policy = all（全部觸發才繼續，否則 skipped）| any（至少一條）
+category: Logic
+description: 同步多條平行分支；policy = all（全部觸發才繼續，任一分支沒走到則 skipped）| any（至少一條）。config.inputs 可把 control 輸入展開成 in_1..in_N
 control_inputs: [in]
 control_outputs: [success]
+config_schema:
+  type: object
+  properties:
+    policy: {type: string, enum: [all, any], default: all, title: 等待策略}
+    inputs: {type: integer, minimum: 2, maximum: 10, title: 輸入數量（不填 = 單一 in 接多條）}
+  additionalProperties: false

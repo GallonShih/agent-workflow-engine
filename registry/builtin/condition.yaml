@@ -1,7 +1,14 @@
 name: condition
 kind: builtin
-description: 條件分支；config 為一條 Rule（op/value/path），成立走 true，否則走 false
+category: Logic
+description: 條件分支；config.rule 成立走 true，否則走 false
 inputs:
   value: {}
 control_inputs: [execute]
 control_outputs: ["true", "false"]
+config_schema:
+  type: object
+  properties:
+    rule: {$type: Rule, title: 條件}
+  required: [rule]
+  additionalProperties: false

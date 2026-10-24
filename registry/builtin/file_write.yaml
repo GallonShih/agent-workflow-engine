@@ -1,0 +1,17 @@
+name: file_write
+kind: builtin
+category: IO
+description: 寫入沙盒工作目錄（預設 .workspace/）內的檔案；不允許絕對路徑、.. 或 symlink 逃出沙盒
+inputs:
+  content: {}
+  path: {schema: {type: string}, required: false}
+outputs:
+  path: {type: string}
+  bytes: {type: integer}
+config_schema:
+  type: object
+  properties:
+    path: {type: string, title: 相對路徑（沒接 path 輸入時使用）}
+    format: {type: string, enum: [text, json], default: text, title: 格式}
+    mode: {type: string, enum: [overwrite, append], default: overwrite, title: 寫入方式}
+  additionalProperties: false

@@ -1,6 +1,12 @@
 name: end
 kind: builtin
-description: 終點；config.status = success | failed 決定整個 run 的結果
+category: Flow
+description: 終點；config.status = success | failed 決定整個 run 的結果；data 輸入會記錄成 run 的輸出
 dynamic_ports: true
 control_inputs: [execute]
 control_outputs: []
+config_schema:
+  type: object
+  properties:
+    status: {type: string, enum: [success, failed], default: success, title: Run 結果}
+  additionalProperties: false

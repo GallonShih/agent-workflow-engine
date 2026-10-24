@@ -3,6 +3,9 @@ import path from 'node:path';
 import { loadRegistry } from '../src/registry-fs.js';
 import { compileWorkflow, runWorkflow, makeRuntimeSelector, scopeKey, type RunEvent } from '../src/index.js';
 import { demoRuntime } from '../src/demo/scenario.js';
+import { nodeServices } from '../src/services-node.js';
+import { RunStore } from '../src/server/run-store.js';
+import { resolveRuntimeMode } from '../src/runtime/select.js';
 
 const args = process.argv.slice(2);
 const flag = (name: string) => args.includes(`--${name}`);
@@ -23,8 +26,10 @@ if (!compiled.ok) {
 console.log(`✓ compiled "${wf.name}" — ${compiled.graph!.nodes.size} nodes, ${compiled.graph!.edges.length} edges (Node Registry: ${registry.list().length} definitions)`);
 
 const mock = demoRuntime({ passOnIteration: scenario === 'fail' ? null : Number(opt('pass-on', '2')), flakyCoder: !flag('no-flaky') });
-const selectRuntime = makeRuntimeSelector(mock, { forceMock: flag('mock') });
-console.log(`runtime: ${process.env.ANTHROPIC_API_KEY && !flag('mock') ? 'claude_agent_sdk（有 ANTHROPIC_API_KEY）' : 'mock（沒有 ANTHROPIC_API_KEY 或 --mock）'}，scenario=${scenario}\n`);
+const runtimeOpt = flag('mock') ? 'mock' : opt('runtime', process.env.AGENT_RUNTIME ?? 'mock');
+const selectRuntime = makeRuntimeSelector(mock, { runtime: runtimeOpt });
+const rt = resolveRuntimeMode(runtimeOpt);
+console.log(`runtime: ${rt.mode}（${rt.reason}），scenario=${scenario}\n`);
 
 const t0 = Date.now();
 const indent = (e: RunEvent) => '  '.repeat((e.scope?.length ?? 0) + 1);
@@ -46,15 +51,16 @@ const onEvent = (e: RunEvent) => {
   }
 };
 
-const result = await runWorkflow(compiled.graph!, { request: '修正 parser 空字串 bug 並讓測試通過', repository: 'github.com/acme/parser' }, { runtime: mock, selectRuntime, onEvent });
+const result = await runWorkflow(compiled.graph!, { request: '修正 parser 空字串 bug 並讓測試通過', repository: 'github.com/acme/parser' }, { runtime: mock, selectRuntime, onEvent, services: nodeServices({ root, registry }) });
 
 console.log(`\nRUN ${result.run_id}: ${result.status.toUpperCase()}  (${result.duration_ms}ms, tokens in/out ${result.token_usage.input_tokens}/${result.token_usage.output_tokens})\n`);
 console.log('key (run_id/scope/node_id)'.padEnd(44) + 'status    runtime  attempts');
 for (const r of result.records) console.log(`${r.key.padEnd(44)}${r.status.padEnd(10)}${(r.runtime ?? '').padEnd(9)}${r.attempts ?? ''}`);
 
-const outDir = path.join(root, '.runs');
-fs.mkdirSync(outDir, { recursive: true });
-fs.writeFileSync(path.join(outDir, `${result.run_id}.events.jsonl`), result.events.map((e) => JSON.stringify(e)).join('\n') + '\n');
-fs.writeFileSync(path.join(outDir, `${result.run_id}.records.json`), JSON.stringify(result.records, null, 2));
-console.log(`\nevents → .runs/${result.run_id}.events.jsonl  records → .runs/${result.run_id}.records.json`);
+new RunStore(path.join(root, '.runs')).saveCompleted(
+  { workflow_name: wf.name, workflow_id: path.basename(wfFile, '.json'), started_at: t0, source: 'cli', runtime: rt.mode, scenario },
+  wf,
+  result,
+);
+console.log(`\nevents → .runs/${result.run_id}.events.jsonl  records → .runs/${result.run_id}.records.json  meta → .runs/${result.run_id}.meta.json`);
 process.exitCode = result.status === (scenario === 'fail' ? 'failed' : 'success') ? 0 : 1;

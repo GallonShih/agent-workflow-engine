@@ -1,0 +1,15 @@
+name: delay
+kind: builtin
+category: Utility
+description: 等待 config.ms 毫秒後繼續；value 原樣傳出
+inputs:
+  value: {schema: {}, required: false}
+outputs:
+  value: {schema: {}, required: false}
+output_overrides: [value]
+config_schema:
+  type: object
+  properties:
+    ms: {type: integer, minimum: 0, maximum: 600000, default: 1000, title: 等待（ms）}
+  required: [ms]
+  additionalProperties: false

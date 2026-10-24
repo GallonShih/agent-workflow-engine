@@ -1,0 +1,30 @@
+name: switch
+kind: builtin
+category: Logic
+description: 多路分支；依序比對 cases，第一個成立的 case（或全部成立的，match = all）觸發同名 control 輸出，都不成立走 default
+inputs:
+  value: {}
+outputs:
+  value: {}
+  matched: {type: array, items: {type: string}}
+output_overrides: [value]
+control_inputs: [execute]
+control_outputs: [default]
+config_schema:
+  type: object
+  properties:
+    cases:
+      type: array
+      title: Cases（每個 case 會變成一個 control 輸出）
+      minItems: 1
+      maxItems: 20
+      items:
+        type: object
+        properties:
+          name: {type: string, pattern: '^[A-Za-z_][A-Za-z0-9_]*$', title: 輸出名稱}
+          rule: {$type: Rule, title: 條件}
+        required: [name, rule]
+        additionalProperties: false
+    match: {type: string, enum: [first, all], default: first, title: 比對方式}
+  required: [cases]
+  additionalProperties: false

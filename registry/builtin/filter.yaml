@@ -1,0 +1,17 @@
+name: filter
+kind: builtin
+category: Data
+description: 對陣列每個元素套用 rule（可用 path 取欄位），輸出符合 / 不符合的元素
+inputs:
+  items: {type: array}
+outputs:
+  items: {type: array}
+  rejected: {type: array}
+  count: {type: integer}
+output_overrides: [items, rejected]
+config_schema:
+  type: object
+  properties:
+    rule: {$type: Rule, title: 保留條件}
+  required: [rule]
+  additionalProperties: false

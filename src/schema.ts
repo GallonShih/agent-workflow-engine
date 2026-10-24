@@ -3,6 +3,8 @@ import type { JSONSchema } from './types.js';
 
 /** 共用 Ajv 實例：驗證 schema 本身、常數輸入、Agent 輸出與 port 執行期的值 */
 export const ajv = new Ajv({ allErrors: true, strict: false });
+// UI 提示用的 format（屬性面板顯示多行輸入），驗證時一律通過
+ajv.addFormat('textarea', true);
 
 const cache = new WeakMap<object, ValidateFunction>();
 

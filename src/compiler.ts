@@ -1,6 +1,10 @@
 import type { DataPortDef, Edge, LoopConfig, NodeDefinition, Rule, WorkflowGraph, WorkflowNode } from './types.js';
 import type { NodeRegistry } from './registry.js';
 import { isCompatible, typeLabel, validateValue } from './schema.js';
+import { evalRule } from './rules.js';
+import { builtins, type PortSet } from './nodes/builtins.js';
+
+export { evalRule };
 
 /** 編譯後的節點：定義 + 實例 + 解析後的「有效 ports」（含 dynamic ports） */
 export interface CompiledNode {
@@ -36,49 +40,71 @@ export interface CompileResult {
 
 /** 不允許 Workflow JSON（例如 Planner 產生的）覆寫的安全相關欄位：權限只能來自 Node Registry */
 const POLICY_FIELDS = ['runtime', 'allowed_tools', 'mcp', 'skills', 'system_prompt', 'model'];
-const RULE_OPS = ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'truthy', 'falsy', 'contains', 'is_empty', 'not_empty'];
 
-export interface LoopPorts {
-  inputs: Record<string, DataPortDef>;
-  outputs: Record<string, DataPortDef>;
+/** composite（loop / foreach）的 body 看到的 ports：loop_in 的輸出與 loop_out 的輸入 */
+export interface BodyPorts {
+  bodyIn: Record<string, DataPortDef>;
+  bodyOut: Record<string, DataPortDef>;
 }
+export type ResolvedPorts = PortSet & { body?: BodyPorts };
+
+const COMPOSITES = ['loop', 'foreach'];
 
 /**
- * 解析一個節點實際的 data ports（含 start/end/template/loop 的 dynamic ports 與 loop_in/loop_out 的繼承 ports）。
- * Compiler 與前端 Rete editor 共用，確保兩邊看到的 port/型別一致。
+ * 解析一個節點實例實際的 ports：
+ * - start / end / template / set / loop / foreach / subflow 的 dynamic ports（node.ports）
+ * - loop_in / loop_out 繼承所在 composite 的 body ports
+ * - output_overrides：實例可收窄 any 輸出的型別（transform.result、http_request.body ...）
+ * - builtins[type].ports：依 config 產生 ports（Merge 輸入數、Switch cases、Join 輸入數 ...）
+ * Compiler 與前端 Rete editor / 屬性面板共用，兩邊看到的 port / 型別一致。
  */
-export function resolveNodePorts(
-  n: WorkflowNode,
-  def: NodeDefinition,
-  registry: NodeRegistry,
-  loop?: LoopPorts,
-): LoopPorts {
-  let inputs = def.inputs;
-  let outputs = def.outputs;
+export function resolveNodePorts(n: WorkflowNode, def: NodeDefinition, registry: NodeRegistry, body?: BodyPorts): ResolvedPorts {
+  let ports: ResolvedPorts = { inputs: def.inputs, outputs: def.outputs, controlInputs: def.control_inputs, controlOutputs: def.control_outputs };
   const dynIn = n.ports?.inputs ? registry.normalizePorts(n.ports.inputs, `${n.id}.ports.inputs`) : {};
   const dynOut = n.ports?.outputs ? registry.normalizePorts(n.ports.outputs, `${n.id}.ports.outputs`) : {};
+  const integer = { schema: { type: 'integer' } };
   switch (n.type) {
     case 'start':
-      outputs = dynOut;
+    case 'set':
+      ports.outputs = dynOut;
       break;
     case 'end':
-      inputs = Object.fromEntries(Object.entries(dynIn).map(([k, p]) => [k, { ...p, required: p.required ?? false }]));
+      ports.inputs = Object.fromEntries(Object.entries(dynIn).map(([k, p]) => [k, { ...p, required: p.required ?? false }]));
       break;
     case 'template':
-      inputs = dynIn;
+      ports.inputs = dynIn;
+      break;
+    case 'subflow':
+      ports.inputs = dynIn;
+      ports.outputs = dynOut;
       break;
     case 'loop':
-      inputs = dynIn;
-      outputs = { ...dynOut, iterations: { schema: { type: 'integer' } } };
+      ports.inputs = dynIn;
+      ports.outputs = { ...dynOut, iterations: integer };
+      ports.body = { bodyIn: { ...dynIn, iteration: integer }, bodyOut: dynOut };
       break;
+    case 'foreach': {
+      const items = dynIn.items ?? def.inputs.items;
+      const extra = Object.fromEntries(Object.entries(dynIn).filter(([k]) => k !== 'items'));
+      ports.inputs = { items, ...extra };
+      ports.outputs = {
+        ...Object.fromEntries(Object.entries(dynOut).map(([k, p]) => [k, { schema: { type: 'array', items: p.schema } }])),
+        count: integer,
+      };
+      ports.body = { bodyIn: { ...extra, item: { schema: (items.schema.items as Record<string, unknown>) ?? {} }, index: integer }, bodyOut: dynOut };
+      break;
+    }
     case 'loop_in':
-      outputs = { ...(loop?.inputs ?? {}), iteration: { schema: { type: 'integer' } } };
+      ports.outputs = body?.bodyIn ?? {};
       break;
     case 'loop_out':
-      inputs = loop?.outputs ?? {};
+      ports.inputs = body?.bodyOut ?? {};
       break;
   }
-  return { inputs, outputs };
+  for (const k of def.output_overrides ?? []) if (dynOut[k] && def.outputs[k]) ports.outputs = { ...ports.outputs, [k]: dynOut[k] };
+  const spec = builtins[n.type];
+  if (spec?.ports) ports = { ...spec.ports(n.config ?? {}, ports), body: ports.body };
+  return ports;
 }
 
 /**
@@ -99,7 +125,7 @@ function compileGraph(
   errors: Diagnostic[],
   warnings: Diagnostic[],
   prefix: string,
-  loop: LoopPorts | undefined,
+  loop: BodyPorts | undefined,
 ): CompiledGraph {
   const err = (code: string, message: string, extra: Partial<Diagnostic> = {}) =>
     errors.push({ code, message: prefix + message, ...extra, node: extra.node ? prefix + extra.node : undefined });
@@ -124,27 +150,37 @@ function compileGraph(
       if (n.config && f in n.config) err('POLICY_OVERRIDE', `node "${n.id}" may not override "${f}" — permissions come from the Node Registry`, { node: n.id });
     }
     if ((n.type === 'loop_in' || n.type === 'loop_out') && !loop) err('LOOP_PORT_OUTSIDE_LOOP', `"${n.type}" is only allowed inside a loop body`, { node: n.id });
-    if (n.ports && !def.dynamic_ports) err('DYNAMIC_PORTS_NOT_ALLOWED', `node type "${n.type}" does not allow dynamic ports`, { node: n.id });
+    if (n.ports && !def.dynamic_ports) {
+      const allowed = def.output_overrides ?? [];
+      const bad = [...Object.keys(n.ports.inputs ?? {}), ...Object.keys(n.ports.outputs ?? {}).filter((k) => !allowed.includes(k))];
+      if (bad.length || n.ports.inputs)
+        err('DYNAMIC_PORTS_NOT_ALLOWED', `node type "${n.type}" does not allow dynamic ports${allowed.length ? ` (only ports.outputs.{${allowed.join(',')}} may narrow types)` : ''}`, { node: n.id });
+    }
 
-    let inputs = def.inputs;
-    let outputs = def.outputs;
+    // 實例 config 用 registry 的 config_schema（Ajv）驗證；agent 的權限欄位另由 POLICY_OVERRIDE 報錯
+    if (def.config_schema) {
+      const cfg = Object.fromEntries(Object.entries(n.config ?? {}).filter(([k]) => !(def.kind === 'agent' && POLICY_FIELDS.includes(k))));
+      const v = validateValue(def.config_schema, cfg);
+      if (!v.ok) err('INVALID_CONFIG', `${n.type} "${n.id}" config: ${String(v.errors).replace(/\bdata\b/g, "config")}`, { node: n.id });
+    }
+
+    let ports: ResolvedPorts = { inputs: def.inputs, outputs: def.outputs, controlInputs: def.control_inputs, controlOutputs: def.control_outputs };
     try {
-      ({ inputs, outputs } = resolveNodePorts(n, def, registry, loop));
+      ports = resolveNodePorts(n, def, registry, loop);
     } catch (e) {
       err('INVALID_PORT_SCHEMA', (e as Error).message, { node: n.id });
     }
-    const cn: CompiledNode = { id: n.id, node: n, def, inputs, outputs, controlInputs: def.control_inputs, controlOutputs: def.control_outputs };
-    checkBuiltinConfig(cn, err);
-    if (n.type === 'loop') {
-      if (!n.body) err('LOOP_WITHOUT_BODY', `loop "${n.id}" needs a body subgraph`, { node: n.id });
+    const cn: CompiledNode = { id: n.id, node: n, def, inputs: ports.inputs, outputs: ports.outputs, controlInputs: ports.controlInputs, controlOutputs: ports.controlOutputs };
+    for (const m of builtins[n.type]?.check?.(n.config ?? {}, ports) ?? []) err('INVALID_CONFIG', `${n.type} "${n.id}": ${m}`, { node: n.id });
+    if (COMPOSITES.includes(n.type)) {
+      if (!n.body) err('LOOP_WITHOUT_BODY', `${n.type} "${n.id}" needs a body subgraph`, { node: n.id });
       else {
-        const bodyOutputs = Object.fromEntries(Object.entries(outputs).filter(([k]) => k !== 'iterations'));
-        cn.body = compileGraph(n.body, registry, errors, warnings, `${prefix}${n.id}.body/`, { inputs, outputs: bodyOutputs });
+        cn.body = compileGraph(n.body, registry, errors, warnings, `${prefix}${n.id}.body/`, ports.body);
         const types = n.body.nodes.map((b) => b.type);
         if (types.filter((t) => t === 'loop_in').length !== 1 || types.filter((t) => t === 'loop_out').length !== 1)
-          err('LOOP_BODY_PORTS', `loop "${n.id}" body needs exactly one loop_in and one loop_out`, { node: n.id });
+          err('LOOP_BODY_PORTS', `${n.type} "${n.id}" body needs exactly one loop_in and one loop_out`, { node: n.id });
       }
-      checkLoopConfig(cn, err);
+      if (n.type === 'loop') checkLoopConfig(cn, err);
     }
     nodes.set(n.id, cn);
   }
@@ -205,34 +241,10 @@ function compileGraph(
   return { nodes, edges: wf.edges.filter((e) => nodes.has(e.from?.node) && nodes.has(e.to?.node)) };
 }
 
-function checkRule(rule: unknown): string | null {
-  if (!rule || typeof rule !== 'object') return 'rule must be an object {op, value?, path?}';
-  const r = rule as Rule;
-  if (!RULE_OPS.includes(r.op)) return `unknown op "${String(r.op)}" (allowed: ${RULE_OPS.join(', ')})`;
-  return null;
-}
-
-function checkBuiltinConfig(cn: CompiledNode, err: (c: string, m: string, x?: Partial<Diagnostic>) => void) {
-  const cfg = cn.node.config ?? {};
-  if (cn.def.name === 'condition') {
-    const r = checkRule(cfg.rule);
-    if (r) err('INVALID_CONFIG', `condition "${cn.id}": ${r}`, { node: cn.id });
-  }
-  if (cn.def.name === 'join' && cfg.policy !== undefined && !['all', 'any'].includes(cfg.policy as string))
-    err('INVALID_CONFIG', `join "${cn.id}": policy must be all | any`, { node: cn.id });
-  if (cn.def.name === 'end' && cfg.status !== undefined && !['success', 'failed'].includes(cfg.status as string))
-    err('INVALID_CONFIG', `end "${cn.id}": status must be success | failed`, { node: cn.id });
-  if (cn.def.name === 'template' && typeof cfg.template !== 'string') err('INVALID_CONFIG', `template "${cn.id}": config.template must be a string`, { node: cn.id });
-}
-
 function checkLoopConfig(cn: CompiledNode, err: (c: string, m: string, x?: Partial<Diagnostic>) => void) {
   const cfg = (cn.node.config ?? {}) as unknown as LoopConfig;
-  if (!Number.isInteger(cfg.max_iterations) || cfg.max_iterations < 1 || cfg.max_iterations > 100)
-    err('INVALID_CONFIG', `loop "${cn.id}": max_iterations must be an integer 1..100`, { node: cn.id });
   if (cfg.until) {
     if (!cn.outputs[cfg.until.port]) err('INVALID_CONFIG', `loop "${cn.id}": until.port "${cfg.until.port}" is not a loop output`, { node: cn.id });
-    const r = checkRule(cfg.until);
-    if (r) err('INVALID_CONFIG', `loop "${cn.id}" until: ${r}`, { node: cn.id });
   }
   for (const c of cfg.carry ?? []) {
     const from = cn.outputs[c.from];
@@ -272,21 +284,3 @@ export function findCycle(ids: string[], edges: Edge[]): string[] | null {
   return null;
 }
 
-export function evalRule(rule: Rule, input: unknown): boolean {
-  let v: unknown = input;
-  if (rule.path) for (const p of rule.path.split('.')) v = v == null ? undefined : (v as Record<string, unknown>)[p];
-  const x = rule.value;
-  switch (rule.op) {
-    case 'eq': return JSON.stringify(v) === JSON.stringify(x);
-    case 'neq': return JSON.stringify(v) !== JSON.stringify(x);
-    case 'gt': return Number(v) > Number(x);
-    case 'gte': return Number(v) >= Number(x);
-    case 'lt': return Number(v) < Number(x);
-    case 'lte': return Number(v) <= Number(x);
-    case 'truthy': return Boolean(v);
-    case 'falsy': return !v;
-    case 'contains': return Array.isArray(v) ? v.some((i) => JSON.stringify(i) === JSON.stringify(x)) : String(v ?? '').includes(String(x));
-    case 'is_empty': return v == null || (Array.isArray(v) ? v.length === 0 : typeof v === 'object' ? Object.keys(v as object).length === 0 : String(v).trim() === '');
-    case 'not_empty': return !evalRule({ ...rule, op: 'is_empty', path: undefined }, v);
-  }
-}
