@@ -8,7 +8,7 @@ import type { RunServices } from './services.js';
 import { ControlSocket, TypedSocket, controlSocket } from './sockets.js';
 import { validateValue } from './schema.js';
 import { interpolateReferences } from './vendor/circuit/orchestrator/references.js';
-import type { AgentEvent, AgentConfig, LoopConfig, NodeRunRecord, NodeStatus, Rule, RunEvent, RunResult, Scope, TokenUsage } from './types.js';
+import type { AgentEvent, AgentConfig, LoopConfig, NodeRunRecord, NodeStatus, RunEvent, RunResult, Scope, TokenUsage } from './types.js';
 import type { AgentRuntime } from './runtime/types.js';
 
 /**
@@ -422,6 +422,17 @@ export class GraphRun {
     throw new Error(`no behavior for node type ${cn.def.name}`);
   }
 
+  /** loop / foreach 的一輪：全新 GraphRun + iteration scope，前後各送一個事件 */
+  private async runIteration(cn: CompiledNode, i: number, bodyInputs: Record<string, unknown>, startData: Record<string, unknown>) {
+    const scope = [...this.scope, { loop: cn.id, iteration: i }];
+    this.ctx.emitEvent('loop_iteration_started', { node_id: cn.id, key: this.key(cn.id), scope, data: { iteration: i, ...startData } });
+    const sub = new GraphRun(cn.body!, scope, this.ctx, bodyInputs);
+    await sub.run();
+    const ok = sub.loopOutputs !== undefined && sub.unhandledFailures.length === 0;
+    this.ctx.emitEvent('loop_iteration_completed', { node_id: cn.id, key: this.key(cn.id), scope, data: { iteration: i, ok, outputs: sub.loopOutputs, failures: sub.unhandledFailures } });
+    return { ok, sub };
+  }
+
   private async runLoop(cn: CompiledNode, inputs: Record<string, unknown>) {
     const cfg = cn.node.config as unknown as LoopConfig;
     let carry: Record<string, unknown> = {};
@@ -429,12 +440,7 @@ export class GraphRun {
     let done = false;
     let i = 0;
     for (; i < cfg.max_iterations; i++) {
-      const scope = [...this.scope, { loop: cn.id, iteration: i }];
-      this.ctx.emitEvent('loop_iteration_started', { node_id: cn.id, key: this.key(cn.id), scope, data: { iteration: i, carry } });
-      const sub = new GraphRun(cn.body!, scope, this.ctx, { ...inputs, ...carry, iteration: i });
-      await sub.run();
-      const ok = sub.loopOutputs !== undefined && sub.unhandledFailures.length === 0;
-      this.ctx.emitEvent('loop_iteration_completed', { node_id: cn.id, key: this.key(cn.id), scope, data: { iteration: i, ok, outputs: sub.loopOutputs, failures: sub.unhandledFailures } });
+      const { ok, sub } = await this.runIteration(cn, i, { ...inputs, ...carry, iteration: i }, { carry });
       if (!ok) {
         if ((cfg.on_body_failure ?? 'fail') === 'fail') throw Object.assign(new Error(`loop body failed at iteration ${i}: ${sub.unhandledFailures.join('; ') || 'loop_out not reached'}`), { record: { iteration: null } });
         continue;
@@ -465,12 +471,7 @@ export class GraphRun {
     const collected: Record<string, unknown[]> = Object.fromEntries(outKeys.map((k) => [k, []]));
     let count = 0;
     for (let i = 0; i < items.length; i++) {
-      const scope = [...this.scope, { loop: cn.id, iteration: i }];
-      this.ctx.emitEvent('loop_iteration_started', { node_id: cn.id, key: this.key(cn.id), scope, data: { iteration: i, item: items[i] } });
-      const sub = new GraphRun(cn.body!, scope, this.ctx, { ...extra, item: items[i], index: i });
-      await sub.run();
-      const ok = sub.loopOutputs !== undefined && sub.unhandledFailures.length === 0;
-      this.ctx.emitEvent('loop_iteration_completed', { node_id: cn.id, key: this.key(cn.id), scope, data: { iteration: i, ok, outputs: sub.loopOutputs, failures: sub.unhandledFailures } });
+      const { ok, sub } = await this.runIteration(cn, i, { ...extra, item: items[i], index: i }, { item: items[i] });
       if (!ok) {
         if ((cfg.on_item_failure ?? 'fail') === 'fail') throw new Error(`foreach item ${i} failed: ${sub.unhandledFailures.join('; ') || 'loop_out not reached'}`);
         continue;

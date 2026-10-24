@@ -1,3 +1,4 @@
+import type { RuleOp } from './rules.js';
 /**
  * 三種獨立資料結構（需求文件「四、Graph Definition」）：
  *   1. NodeDefinition   — Node Registry 裡可重複使用的節點定義（YAML/JSON）
@@ -91,7 +92,7 @@ export interface Edge {
 }
 
 export interface Rule {
-  op: 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte' | 'truthy' | 'falsy' | 'contains' | 'is_empty' | 'not_empty';
+  op: RuleOp;
   value?: unknown;
   /** 讀取物件內欄位，例如 "summary.passed" */
   path?: string;

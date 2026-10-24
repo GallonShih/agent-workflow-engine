@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { compileWorkflow, resolveNodePorts, type BodyPorts, type CompileResult, type Diagnostic, type ResolvedPorts } from '../../src/compiler.js';
-import { bodyPortsAt, boundaryAnnotations, getGraphAt, isDrillable, setGraphAt } from '../../src/graph-path.js';
+import { compileWorkflow, resolveNodePorts, type CompileResult, type Diagnostic, type ResolvedPorts } from '../../src/compiler.js';
+import { boundaryAnnotations, isDrillable, setGraphAt } from '../../src/graph-path.js';
 import { runWorkflow } from '../../src/engine.js';
-import { isV1, normalizeWorkflow, serializeV1 } from '../../src/dsl.js';
+import { isV1 } from '../../src/dsl.js';
 import { demoRuntime } from '../../src/demo/scenario.js';
 import type { RunEvent, Scope, WorkflowGraph, WorkflowNode } from '../../src/types.js';
 import demoWorkflow from '../../workflows/fix-until-tests-pass.json';
@@ -13,13 +13,11 @@ import { PropertiesPanel } from './properties.js';
 import { NodeRunPanel, RunHistory, RunSummary, Badge } from './monitor-panel.js';
 import { applyEvent, emptyRun, iterationsOf, reduceEvents, resolveScope, scopeKeyOf, statusesFor, type RunView } from './monitor.js';
 import { backend, type RunMeta } from './api.js';
+import { DiagnosticsList, NodeLibrary, Tabs } from './panels.js';
+import { norm, resolveView, toFile, type Crumb } from './view.js';
 
 const STORAGE_KEY = 'agent-workflow-poc:workflow:v1';
 const ADV_KEY = 'agent-workflow-poc:advanced';
-/** 檔案格式（v1 edges 是字串）→ 編輯器內部格式（edge 物件）；舊格式原樣 */
-const norm = (wf: unknown): WorkflowGraph => normalizeWorkflow(wf).graph;
-/** 內部格式 → 存檔格式（v1 寫回精簡字串 edges） */
-const toFile = (wf: WorkflowGraph) => (isV1(wf) ? serializeV1(wf) : wf);
 const registry = loadBrowserRegistry();
 const clone = <T,>(x: T): T => JSON.parse(JSON.stringify(x));
 const DEMO_INPUTS = { request: '修正 parser 空字串 bug 並讓測試通過', repository: 'github.com/acme/parser' };
@@ -29,56 +27,7 @@ const BUNDLED: Record<string, WorkflowGraph> = Object.fromEntries(
   Object.entries(import.meta.glob('../../workflows/*.json', { eager: true, import: 'default' }) as Record<string, WorkflowGraph>).map(([f, w]) => [f.split('/').pop()!.replace(/\.json$/, ''), w]),
 );
 
-/** 畫布路徑的一層：loop / foreach 的 body，或 subflow 引用的 workflow（唯讀） */
-interface Crumb {
-  id: string;
-  kind: string;
-  label: string;
-  workflowId?: string;
-  /** subflow：drill-in 當下用的子流程結構（run 的快照，或從 workflows/ 載入） */
-  graph?: WorkflowGraph;
-}
 
-/** 依路徑解析目前畫面：要畫的圖、可編輯的 root 與 body 路徑、外層與 composite（算邊界註解用） */
-function resolveView(wf: WorkflowGraph, path: Crumb[]) {
-  let root = wf;
-  let inner: string[] = [];
-  let readOnly = false;
-  let sourceId: string | undefined;
-  let outer: WorkflowGraph | undefined;
-  let composite: WorkflowNode | undefined;
-  for (const c of path) {
-    const g = getGraphAt(root, inner);
-    const n = g?.nodes.find((x) => x.id === c.id);
-    if (!g || !n || !c) return null;
-    outer = g;
-    composite = n;
-    if (n.type === 'subflow') {
-      if (!c.graph) return null;
-      root = c.graph;
-      inner = [];
-      readOnly = true;
-      sourceId = c.workflowId;
-    } else inner = [...inner, n.id];
-  }
-  const graph = getGraphAt(root, inner);
-  if (!graph) return null;
-  return { graph, root, inner, readOnly, sourceId, outer, composite, body: inner.length ? bodyPortsAt(root, inner, registry) : undefined };
-}
-
-type Tab<T extends string> = [T, string];
-function Tabs<T extends string>(props: { tabs: Tab<T>[]; value: T; onChange: (t: T) => void }) {
-  return (
-    <div style={{ display: 'flex', borderBottom: '1px solid #e2e8f0', background: '#f8fafc' }}>
-      {props.tabs.map(([k, label]) => (
-        <button key={k} data-tab={k} onClick={() => props.onChange(k)}
-          style={{ flex: 1, padding: '8px 6px', border: 0, borderBottom: props.value === k ? '3px solid #2563eb' : '3px solid transparent', background: 'transparent', fontWeight: props.value === k ? 700 : 400, cursor: 'pointer' }}>
-          {label}
-        </button>
-      ))}
-    </div>
-  );
-}
 
 function App() {
   const container = useRef<HTMLDivElement>(null);
@@ -125,7 +74,7 @@ function App() {
   const log = (msg: string, level: 'info' | 'error' = 'info') => setLogs((l) => [...l.slice(-400), { msg, level }]);
 
   // ------------------------------------------------------------ graph helpers
-  const viewOf = (wf = wfRef.current, p = pathRef.current) => resolveView(wf, p);
+  const viewOf = (wf = wfRef.current, p = pathRef.current) => resolveView(wf, p, registry);
   const viewGraph = (wf = wfRef.current, p = pathRef.current): WorkflowGraph => viewOf(wf, p)?.graph ?? { nodes: [], edges: [] };
   const readOnlyNow = () => !!viewOf()?.readOnly;
 
@@ -183,12 +132,12 @@ function App() {
 
   async function show(p: Crumb[], pk: (number | null)[] = p.map(() => null), wf = wfRef.current) {
     if (!api.current) return;
-    let v = resolveView(wf, p);
+    let v = resolveView(wf, p, registry);
     if (!v) {
       log(`找不到路徑 ${p.map((c) => c.id).join(' › ')}，回到主流程`, 'error');
       p = [];
       pk = [];
-      v = resolveView(wf, [])!;
+      v = resolveView(wf, [], registry)!;
     }
     pathRef.current = p;
     picksRef.current = pk;
@@ -517,7 +466,7 @@ function App() {
   }
 
   // ------------------------------------------------------------ derived for panels
-  const cur = resolveView(workflow, path);
+  const cur = resolveView(workflow, path, registry);
   const g = cur?.graph ?? { nodes: [], edges: [] };
   const readOnly = !!cur?.readOnly;
   const selNode = selected ? g.nodes.find((n) => n.id === selected) : undefined;
@@ -599,20 +548,7 @@ function App() {
           <Tabs tabs={[['library', '節點庫'], ['history', '執行紀錄']]} value={leftTab} onChange={(t) => { setLeftTab(t); if (t === 'history') void refreshRuns(); }} />
           <div style={{ overflow: 'auto', minHeight: 0 }}>
             {leftTab === 'library' ? (
-              <div style={{ padding: 8, fontSize: 12 }} data-testid="node-library">
-                {library.map(([cat, names]) => (
-                  <div key={cat} style={{ marginBottom: 10 }}>
-                    <div style={{ fontWeight: 700, color: '#475569', margin: '4px 0' }}>{cat}</div>
-                    {names.map((name) => (
-                      <div key={name} data-library-item={name} title={registry.get(name)?.description} onClick={() => void addNode(name)}
-                        style={{ padding: '4px 8px', margin: '2px 0', border: '1px solid #e2e8f0', borderRadius: 6, cursor: 'pointer', background: '#fff' }}>
-                        {name}
-                      </div>
-                    ))}
-                  </div>
-                ))}
-                <div style={{ color: '#94a3b8' }}>點一下加入目前畫面</div>
-              </div>
+              <NodeLibrary groups={library} registry={registry} onAdd={(name) => void addNode(name)} />
             ) : (
               <RunHistory runs={runs} backend={!!backendInfo} activeId={activeRun?.run_id} onOpen={(id) => void openRun(id)} onRefresh={() => void refreshRuns()} />
             )}
@@ -683,18 +619,7 @@ function App() {
           <div style={{ borderTop: '1px solid #ddd', display: 'grid', gridTemplateRows: 'auto 1fr', minHeight: 0 }}>
             <Tabs tabs={[['diag', `Diagnostics${diag ? `（${diag.errors.length}/${diag.warnings.length}）` : ''}`], ['log', 'Log'], ['json', 'Workflow JSON']]} value={bottomTab} onChange={(t) => { setBottomTab(t); if (t === 'json') setJsonText(JSON.stringify(toFile(commit()), null, 2)); }} />
             <div style={{ overflow: 'auto', fontSize: 12, padding: bottomTab === 'json' ? 0 : 8, minHeight: 0 }}>
-              {bottomTab === 'diag' && (
-                <div data-testid="diagnostics">
-                  {diag?.errors.map((d, i) => (
-                    <div key={i} style={{ color: '#b91c1c', cursor: d.node ? 'pointer' : undefined, marginBottom: 2 }} onClick={() => d.node && api.current?.select(d.node.split('/').pop()!)}>
-                      [{d.code}] {d.message}
-                      {d.fix && <div style={{ color: '#475569', paddingLeft: 14 }}>↳ {d.fix}</div>}
-                    </div>
-                  ))}
-                  {diag?.warnings.map((d, i) => <div key={i} style={{ color: '#92400e' }}>[{d.code}] {d.message}</div>)}
-                  {diag && !diag.errors.length && <div style={{ color: '#15803d' }}>沒有錯誤（每次修改都會用同一份 compileWorkflow 重新驗證）</div>}
-                </div>
-              )}
+              {bottomTab === 'diag' && <DiagnosticsList diag={diag} onSelect={(id) => api.current?.select(id)} />}
               {bottomTab === 'log' && logs.map((l, i) => <div key={i} style={{ fontFamily: 'ui-monospace, monospace', color: l.level === 'error' ? '#b91c1c' : '#111', whiteSpace: 'pre-wrap' }}>{l.msg}</div>)}
               {bottomTab === 'json' && (
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', height: '100%' }}>

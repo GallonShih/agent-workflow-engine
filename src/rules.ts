@@ -1,6 +1,7 @@
 import type { Rule } from './types.js';
 
-export const RULE_OPS = ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'truthy', 'falsy', 'contains', 'is_empty', 'not_empty'];
+export const RULE_OPS = ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'truthy', 'falsy', 'contains', 'is_empty', 'not_empty'] as const;
+export type RuleOp = (typeof RULE_OPS)[number];
 
 /** Condition / Switch / Filter / Loop until 共用的規則求值 */
 export function evalRule(rule: Rule, input: unknown): boolean {
