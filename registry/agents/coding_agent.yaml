@@ -1,0 +1,22 @@
+name: coding_agent
+version: 1
+runtime: claude_agent_sdk
+model: claude-sonnet-4-5
+category: Agent Nodes
+system_prompt: 你是工程師，依工作項目修改程式碼；若有上一輪測試失敗回饋，優先修正。
+prompt: |
+  工作項目：{{inputs.tasks}}
+  上一輪測試回饋：{{inputs.feedback}}
+mcp: [github]
+skills: [code-change]
+allowed_tools: [Read, Edit, Write, Bash]
+inputs:
+  tasks: {type: array, items: {$type: Task}}
+  feedback: {schema: {type: array, items: {type: string}}, required: false, default: []}
+outputs:
+  files_modified: {type: array, items: {type: string}}
+  summary: {type: string}
+config:
+  max_turns: 10
+  timeout_seconds: 300
+  retry: {max_attempts: 2, backoff_ms: 10}

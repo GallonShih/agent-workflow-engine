@@ -1,0 +1,6 @@
+name: loop_out
+kind: builtin
+description: （僅限 loop body）本輪輸出；被 control edge 觸發時收集 data inputs
+dynamic_ports: true
+control_inputs: [execute]
+control_outputs: []

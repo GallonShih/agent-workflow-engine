@@ -1,0 +1,28 @@
+{
+  "name": "agent-workflow-poc",
+  "version": "1.0.0",
+  "description": "Dynamic Agent Workflow Engine PoC (typed ports + hybrid dataflow/control flow + loop composite)",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -p .",
+    "demo": "tsx scripts/run-demo.ts",
+    "validate": "tsx scripts/validate.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.310",
+    "ajv": "^8.20.0",
+    "rete": "^2.0.6",
+    "rete-engine": "^2.1.1",
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.12"
+  }
+}

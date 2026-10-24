@@ -1,0 +1,7 @@
+name: template
+kind: builtin
+mode: data
+description: 純資料節點（lazy pull）；用 {{inputs.port}} 組字串
+dynamic_ports: true
+outputs:
+  text: {type: string}

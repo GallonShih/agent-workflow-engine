@@ -1,0 +1,6 @@
+name: end
+kind: builtin
+description: 終點；config.status = success | failed 決定整個 run 的結果
+dynamic_ports: true
+control_inputs: [execute]
+control_outputs: []

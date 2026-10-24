@@ -1,0 +1,6 @@
+name: loop_in
+kind: builtin
+description: （僅限 loop body）本輪輸入：loop inputs + carry + iteration
+dynamic_ports: true
+control_inputs: []
+control_outputs: [success]

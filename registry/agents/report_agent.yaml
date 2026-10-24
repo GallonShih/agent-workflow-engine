@@ -1,0 +1,20 @@
+name: report_agent
+version: 1
+runtime: claude_agent_sdk
+model: claude-sonnet-4-5
+category: Agent Nodes
+system_prompt: 你負責撰寫最終交付報告。
+prompt: |
+  {{inputs.headline}}
+  計畫：{{inputs.plan}}
+  風險：{{inputs.risks}}
+allowed_tools: []
+inputs:
+  headline: {type: string}
+  plan: {type: string}
+  risks: {schema: {type: array, items: {type: object}}, required: false}
+outputs:
+  report: {type: string}
+config:
+  max_turns: 3
+  timeout_seconds: 60

@@ -1,0 +1,6 @@
+name: loop
+kind: builtin
+description: Loop composite node；body 子圖每一輪用全新的 Rete editor/engine 與 iteration scope 執行
+dynamic_ports: true
+control_inputs: [execute]
+control_outputs: [completed, done, exhausted, failure]

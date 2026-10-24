@@ -1,0 +1,5 @@
+name: join
+kind: builtin
+description: 同步多條平行分支；config.policy = all（全部觸發才繼續，否則 skipped）| any（至少一條）
+control_inputs: [in]
+control_outputs: [success]
