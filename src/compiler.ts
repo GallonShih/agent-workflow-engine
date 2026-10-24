@@ -4,6 +4,7 @@ import { isCompatible, typeLabel, validateValue } from './schema.js';
 import { evalRule } from './rules.js';
 import { builtins, type PortSet } from './nodes/builtins.js';
 import { normalizeWorkflow, isV1 } from './dsl.js';
+import { maxPermission, permissionOf, type WorkspacePermission } from './workspace-policy.js';
 import { tierOf } from './registry.js';
 import { fixFor, closest, V1_ALTERNATIVES } from './fixes.js';
 
@@ -33,6 +34,11 @@ export interface CompiledGraph {
 export interface CompileOptions {
   /** 開啟進階功能：舊版 hybrid 格式（control edges）、advanced 節點、巢狀 loop、loop carry / on_body_failure */
   advanced?: boolean;
+  /**
+   * 這次 run 有沒有 workspace：false = 沒有 → 需要 read / write 的 agent 節點會產生 WORKSPACE_REQUIRED 錯誤；
+   * undefined = 不檢查（例如只是驗證），結果的 workspace_required 仍會列出需求。
+   */
+  workspace?: boolean;
 }
 
 export interface Diagnostic {
@@ -52,10 +58,13 @@ export interface CompileResult {
   graph?: CompiledGraph;
   /** 正規化後的 workflow（v1 字串 edges 已展開） */
   workflow?: WorkflowGraph;
+  /** workflow 需要的 workspace 權限（所有 scope 的 agent 節點取最高）與需要的節點 */
+  workspace_required: WorkspacePermission;
+  workspace_nodes: { node: string; access: WorkspacePermission }[];
 }
 
 /** 不允許 Workflow JSON（例如 Planner 產生的）覆寫的安全相關欄位：權限只能來自 Node Registry */
-const POLICY_FIELDS = ['runtime', 'allowed_tools', 'mcp', 'skills', 'system_prompt', 'model'];
+const POLICY_FIELDS = ['runtime', 'allowed_tools', 'mcp', 'skills', 'system_prompt', 'model', 'workspace'];
 
 /** composite（loop / foreach）的 body 看到的 ports：loop_in 的輸出與 loop_out 的輸入 */
 export interface BodyPorts {
@@ -166,9 +175,20 @@ export function compileWorkflow(raw: WorkflowGraph | unknown, registry: NodeRegi
   }
   const ctx: Ctx = { registry, errors, warnings, v1, advanced, all: [] };
   const graph = compileGraph(wf, ctx, '', undefined);
+  const workspace_nodes = ctx.all.flatMap(({ prefix, nodes }) =>
+    [...nodes.values()].map((cn) => ({ node: prefix + cn.id, access: permissionOf(cn.def) })).filter((x) => x.access !== 'none'),
+  );
+  const workspace_required = workspace_nodes.reduce<WorkspacePermission>((a, x) => maxPermission(a, x.access), 'none');
+  if (opts.workspace === false && workspace_required !== 'none')
+    errors.push({
+      code: 'WORKSPACE_REQUIRED',
+      message: `workflow needs a workspace (${workspace_nodes.map((x) => `${x.node}: ${x.access}`).join(', ')}) but this run has none`,
+      path: '',
+      fix: 'Pass "workspace": "/absolute/path/to/your/repo" when running (REST body, MCP run_workflow, CLI --workspace, or the UI workspace field). The path must be inside WORKSPACE_ROOTS.',
+    });
   for (const d of errors) d.fix ??= fixFor(d, ctx);
   for (const d of warnings) d.fix ??= fixFor(d, ctx);
-  return { ok: errors.length === 0, errors, warnings, graph: errors.length === 0 ? graph : undefined, workflow: wf };
+  return { ok: errors.length === 0, errors, warnings, graph: errors.length === 0 ? graph : undefined, workflow: wf, workspace_required, workspace_nodes };
 }
 
 const isObj = (x: unknown): x is Record<string, unknown> => !!x && typeof x === 'object' && !Array.isArray(x);

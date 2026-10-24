@@ -6,6 +6,8 @@ import { demoRuntime } from '../src/demo/scenario.js';
 import { nodeServices } from '../src/services-node.js';
 import { RunStore } from '../src/server/run-store.js';
 import { resolveRuntimeMode } from '../src/runtime/select.js';
+import os from 'node:os';
+import { WorkspaceError, beginWorkspace, parseWorkspaceRoots, resolveWorkspace, writeWorkspaceFile } from '../src/workspace.js';
 
 const args = process.argv.slice(2);
 const flag = (name: string) => args.includes(`--${name}`);
@@ -17,7 +19,24 @@ const scenario = opt('scenario', 'pass'); // pass | fail
 const registry = loadRegistry(path.join(root, 'registry/builtin'), path.join(root, 'registry/agents'));
 const wf = JSON.parse(fs.readFileSync(wfFile, 'utf8'));
 
-const compiled = compileWorkflow(wf, registry);
+// workspace：--workspace <path>（必須在 WORKSPACE_ROOTS 內）；沒給時 demo 自己建一個暫存目錄當 workspace（並開啟 mock 寫檔）
+let workspace: string;
+let mockWrites = flag('mock-writes');
+if (args.includes('--workspace')) {
+  try {
+    workspace = resolveWorkspace(opt('workspace', ''), parseWorkspaceRoots());
+  } catch (e) {
+    if (!(e instanceof WorkspaceError)) throw e;
+    console.error(`✗ ${e.message}\n  fix: ${e.fix}`);
+    process.exit(2);
+  }
+} else {
+  workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'awf-demo-workspace-'));
+  mockWrites = true;
+  console.log(`(沒有 --workspace：使用 demo 暫存 workspace ${workspace}，mock coding agent 會在裡面寫檔)`);
+}
+
+const compiled = compileWorkflow(wf, registry, { workspace: true });
 for (const w of compiled.warnings) console.log(`  ⚠ ${w.code}: ${w.message}`);
 if (!compiled.ok) {
   for (const e of compiled.errors) console.log(`  ✗ ${e.code}: ${e.message}`);
@@ -25,12 +44,14 @@ if (!compiled.ok) {
 }
 console.log(`✓ compiled "${wf.name}" — ${compiled.graph!.nodes.size} nodes, ${compiled.graph!.edges.length} edges (Node Registry: ${registry.list().length} definitions)`);
 
-const mock = demoRuntime({ passOnIteration: scenario === 'fail' ? null : Number(opt('pass-on', '2')), flakyCoder: !flag('no-flaky') });
+const mock = demoRuntime({ passOnIteration: scenario === 'fail' ? null : Number(opt('pass-on', '2')), flakyCoder: !flag('no-flaky'), writeFile: mockWrites ? writeWorkspaceFile : undefined });
 const runtimeOpt = flag('mock') ? 'mock' : opt('runtime', process.env.AGENT_RUNTIME ?? 'mock');
 const selectRuntime = makeRuntimeSelector(mock, { runtime: runtimeOpt });
 const rt = resolveRuntimeMode(runtimeOpt);
 console.log(`runtime: ${rt.mode}（${rt.reason}），scenario=${scenario}\n`);
 
+const ws = await beginWorkspace(workspace, compiled.workspace_required);
+console.log(`workspace: ${workspace}${ws.report.git ? `  (git ${ws.report.git.branch ?? 'detached'} @ ${ws.report.git.head?.slice(0, 8) ?? '(no commits)'})` : ''}\n`);
 const t0 = Date.now();
 const indent = (e: RunEvent) => '  '.repeat((e.scope?.length ?? 0) + 1);
 const where = (e: RunEvent) => `${e.scope?.length ? scopeKey(e.scope) + '/' : ''}${e.node_id}`;
@@ -51,14 +72,19 @@ const onEvent = (e: RunEvent) => {
   }
 };
 
-const result = await runWorkflow(compiled.graph!, { request: '修正 parser 空字串 bug 並讓測試通過', repository: 'github.com/acme/parser' }, { runtime: mock, selectRuntime, onEvent, services: nodeServices({ root, registry }) });
+const result = await runWorkflow(compiled.graph!, { request: '修正 parser 空字串 bug 並讓測試通過', repository: 'github.com/acme/parser' }, { runtime: mock, selectRuntime, onEvent, services: nodeServices({ root, registry }), workspace });
+const wsReport = await ws.finish();
 
 console.log(`\nRUN ${result.run_id}: ${result.status.toUpperCase()}  (${result.duration_ms}ms, tokens in/out ${result.token_usage.input_tokens}/${result.token_usage.output_tokens})\n`);
 console.log('key (run_id/scope/node_id)'.padEnd(44) + 'status    runtime  attempts');
 for (const r of result.records) console.log(`${r.key.padEnd(44)}${r.status.padEnd(10)}${(r.runtime ?? '').padEnd(9)}${r.attempts ?? ''}`);
 
+const st = wsReport.diff_stat;
+console.log(`\nworkspace 變更：${st ? `${st.files} files, +${st.insertions} -${st.deletions}` : '(無)'}${wsReport.error ? `  ⚠ ${wsReport.error}` : ''}`);
+for (const c of wsReport.changed_files ?? []) console.log(`  ${c.status.padEnd(9)}${c.path}${c.insertions !== undefined ? `  +${c.insertions} -${c.deletions}` : ''}`);
+
 new RunStore(path.join(root, '.runs')).saveCompleted(
-  { workflow_name: wf.name, workflow_id: path.basename(wfFile, '.json'), started_at: t0, source: 'cli', runtime: rt.mode, scenario },
+  { workflow_name: wf.name, workflow_id: path.basename(wfFile, '.json'), started_at: t0, source: 'cli', runtime: rt.mode, scenario, workspace: wsReport },
   wf,
   result,
 );

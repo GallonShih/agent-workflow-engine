@@ -83,7 +83,8 @@ export function fixedWorkflow() {
   return wf;
 }
 
-export async function mcpE2E(client: Client, log: Log) {
+/** workspace：agent 節點操作的目錄（必須在 MCP server 的 WORKSPACE_ROOTS 內） */
+export async function mcpE2E(client: Client, log: Log, workspace: string) {
   const tools = await client.listTools();
   log('tools/list', tools.tools.map((t) => t.name));
 
@@ -107,7 +108,10 @@ export async function mcpE2E(client: Client, log: Log) {
   const listed = await call(client, 'list_workflows');
   log('list_workflows', listed.json.map((w: { id: string; version: number }) => `${w.id} (v${w.version})`));
 
-  const started = await call(client, 'run_workflow', { workflow_id: 'mcp-demo', inputs: { request: '修正 parser 空字串 bug', repository: 'github.com/acme/parser' }, scenario: 'pass', pass_on: 1, mock_delay_ms: 5 });
+  const runArgs = { workflow_id: 'mcp-demo', inputs: { request: '修正 parser 空字串 bug', repository: 'github.com/acme/parser' }, scenario: 'pass', pass_on: 1, mock_delay_ms: 5 };
+  const noWs = await call(client, 'run_workflow', runArgs);
+  log('run_workflow (no workspace) → rejected', { isError: noWs.isError, errors: noWs.json.errors?.map((e: { code: string; fix?: string }) => ({ code: e.code, fix: e.fix })) });
+  const started = await call(client, 'run_workflow', { ...runArgs, workspace, mock_writes: true });
   log('run_workflow', started.json);
 
   let run: Record<string, any> = {};
@@ -118,7 +122,8 @@ export async function mcpE2E(client: Client, log: Log) {
     await new Promise((r) => setTimeout(r, 50));
   }
   log(`get_run (after ${polls + 1} polls)`, { status: run.status, ended_at: run.ended_at, counts: run.counts, nodes: run.nodes.map((n: { key: string; status: string; attempts?: number }) => `${n.key}: ${n.status}${n.attempts && n.attempts > 1 ? ` (${n.attempts} attempts)` : ''}`) });
-  return { tools, bad: bad.json, good: good.json, saved, rejected, run, started: started.json };
+  log('get_run workspace', run.workspace);
+  return { tools, bad: bad.json, good: good.json, saved, rejected, run, started: started.json, noWs };
 }
 
 export function stdioTransport(env: Record<string, string>) {
@@ -135,8 +140,10 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-demo-'));
   const wfDir = path.join(tmp, 'workflows');
   fs.cpSync(path.join(root, 'workflows'), wfDir, { recursive: true });
+  const workspace = path.join(tmp, 'workspace');
+  fs.mkdirSync(workspace);
   const client = new Client({ name: 'mcp-demo', version: '1.0.0' });
-  await client.connect(stdioTransport({ WORKFLOW_DIR: wfDir, WORKFLOW_RUNS_DIR: path.join(tmp, 'runs'), MOCK_DELAY_MS: '5' }));
-  await mcpE2E(client, (step, detail) => console.log(`\n### ${step}\n${typeof detail === 'string' ? detail : JSON.stringify(detail, null, 2)}`));
+  await client.connect(stdioTransport({ WORKFLOW_DIR: wfDir, WORKFLOW_RUNS_DIR: path.join(tmp, 'runs'), MOCK_DELAY_MS: '5', WORKSPACE_ROOTS: tmp }));
+  await mcpE2E(client, (step, detail) => console.log(`\n### ${step}\n${typeof detail === 'string' ? detail : JSON.stringify(detail, null, 2)}`), workspace);
   await client.close();
 }

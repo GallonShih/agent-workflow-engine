@@ -181,8 +181,58 @@ export function RunHistory(props: { runs: RunMeta[] | null; activeId?: string; o
             {r.workflow_name} · {new Date(r.started_at).toLocaleString()} · {r.duration_ms !== undefined ? `${r.duration_ms} ms` : '—'} · {r.source}/{r.runtime}
             {r.resumed_from && <> · resume 自 <code>{r.resumed_from}</code></>}
           </div>
+          {r.workspace && (
+            <div style={{ color: '#64748b', marginTop: 2 }} title={r.workspace.path}>
+              📁 {r.workspace.path.split(/[\\/]/).pop()}{r.workspace.git?.branch ? ` (${r.workspace.git.branch})` : ''}
+              {r.workspace.diff_stat && <> · {r.workspace.diff_stat.files} 個檔案變更 +{r.workspace.diff_stat.insertions} -{r.workspace.diff_stat.deletions}</>}
+            </div>
+          )}
         </div>
       ))}
+    </div>
+  );
+}
+
+const CHANGE_COLOR: Record<string, string> = { added: '#15803d', modified: '#b45309', deleted: '#b91c1c', renamed: '#7c3aed' };
+
+/** run 的 workspace：路徑、git branch / HEAD、變更檔案與 diff stat（run 結束後才有變更清單） */
+export function WorkspacePanel({ ws, running }: { ws?: RunMeta['workspace']; running: boolean }) {
+  if (!ws) return null;
+  const st = ws.diff_stat;
+  const short = (s?: string | null) => (s ? s.slice(0, 8) : '—');
+  return (
+    <div data-testid="workspace-panel" style={{ ...section, fontSize: 12 }}>
+      <h4 style={h}>Workspace</h4>
+      <div><code data-testid="workspace-path" style={{ wordBreak: 'break-all' }}>{ws.path}</code>{ws.required && <span style={{ color: '#64748b' }}> · 需要 {ws.required}</span>}</div>
+      {ws.git ? (
+        <div style={{ color: '#475569', marginTop: 2 }}>
+          git <b>{ws.git.branch ?? '(detached)'}</b> @ <code>{short(ws.git.head)}</code>
+          {ws.git.head_after && ws.git.head_after !== ws.git.head && <> → <code>{short(ws.git.head_after)}</code>（run 期間有新 commit）</>}
+        </div>
+      ) : (
+        <div style={{ color: '#475569', marginTop: 2 }}>非 git 目錄（以 mtime / hash 快照比對）</div>
+      )}
+      {ws.error && <div style={{ color: '#b91c1c', marginTop: 2 }}>⚠ {ws.error}</div>}
+      {!ws.changed_files ? (
+        <div style={{ color: '#64748b', marginTop: 4 }}>{running ? '執行中…變更清單會在 run 結束後顯示' : '沒有變更紀錄'}</div>
+      ) : (
+        <>
+          <div data-testid="diff-stat" style={{ marginTop: 4 }}>
+            變更 <b>{st?.files ?? 0}</b> 個檔案 <span style={{ color: '#15803d' }}>+{st?.insertions ?? 0}</span> <span style={{ color: '#b91c1c' }}>-{st?.deletions ?? 0}</span>
+            {ws.truncated && <span style={{ color: '#b45309' }}>（已截斷）</span>}
+          </div>
+          <div data-testid="changed-files" style={{ marginTop: 4 }}>
+            {ws.changed_files.map((c) => (
+              <div key={c.path} style={{ display: 'flex', gap: 6, alignItems: 'baseline', margin: '2px 0' }}>
+                <span style={{ color: CHANGE_COLOR[c.status], fontWeight: 600, width: 62 }}>{c.status}</span>
+                <code style={{ flex: 1, wordBreak: 'break-all' }}>{c.path}</code>
+                {c.insertions !== undefined && <span style={{ color: '#64748b' }}>+{c.insertions} -{c.deletions}</span>}
+              </div>
+            ))}
+            {ws.changed_files.length === 0 && <span style={{ color: '#64748b' }}>（沒有檔案被修改）</span>}
+          </div>
+        </>
+      )}
     </div>
   );
 }

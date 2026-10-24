@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { loadRegistry } from '../src/registry-fs.js';
 import type { NodeRegistry } from '../src/registry.js';
@@ -29,3 +31,8 @@ export const ctl = (from: string, to: string): Edge => {
   return { kind: 'control', from: { node: fn, port: fp }, to: { node: tn, port: tp ?? 'execute' } };
 };
 export const wf = (nodes: WorkflowNode[], edges: Edge[]): WorkflowGraph => ({ nodes, edges });
+
+/** 測試用 workspace：暫存目錄（realpath，避免 macOS /var → /private/var 之類的差異） */
+export const tmpWorkspace = (prefix = 'awf-ws-') => fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
+/** 共用的 workspace（agent 節點需要 read / write 權限時用） */
+export const WS = tmpWorkspace();

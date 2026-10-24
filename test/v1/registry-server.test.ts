@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { buildServer } from '../../src/server/app.js';
-import { registry, root } from '../helpers.js';
+import { registry, root, WS } from '../helpers.js';
 
 describe('node tiers', () => {
   it('registry lists ~10 v1 builtins + agents by default; advanced nodes only on request', () => {
@@ -20,7 +20,7 @@ describe('node tiers', () => {
 describe('backend in v1 mode (default)', () => {
   const wfDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wf-v1-'));
   for (const f of fs.readdirSync(path.join(root, 'workflows'))) fs.copyFileSync(path.join(root, 'workflows', f), path.join(wfDir, f));
-  const app = buildServer({ root, workflowsDir: wfDir, runsDir: fs.mkdtempSync(path.join(os.tmpdir(), 'wf-v1-runs-')), mockDelayMs: 0 });
+  const app = buildServer({ root, workflowsDir: wfDir, runsDir: fs.mkdtempSync(path.join(os.tmpdir(), 'wf-v1-runs-')), mockDelayMs: 0, workspaceRoots: [WS] });
   afterAll(() => app.close());
 
   it('registry endpoint hides advanced nodes unless ?advanced=1', async () => {
@@ -47,7 +47,7 @@ describe('backend in v1 mode (default)', () => {
   });
 
   it('runs the v1 demo to success; resume is advanced-only (403)', async () => {
-    const start = await app.inject({ method: 'POST', url: '/api/runs', payload: { workflow_id: 'fix-until-tests-pass', mock_delay_ms: 0 } });
+    const start = await app.inject({ method: 'POST', url: '/api/runs', payload: { workflow_id: 'fix-until-tests-pass', mock_delay_ms: 0, workspace: WS } });
     expect(start.statusCode).toBe(202);
     const id = start.json().run_id;
     let run;

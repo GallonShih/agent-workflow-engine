@@ -18,6 +18,7 @@ import { RunStore, type RunMeta } from './run-store.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { createMcpServer } from '../mcp/server.js';
 import { injectBackend } from '../mcp/backend.js';
+import { WorkspaceError, beginWorkspace, parseWorkspaceRoots, resolveWorkspace, writeWorkspaceFile } from '../workspace.js';
 
 export interface ServerOptions {
   root: string;
@@ -46,6 +47,11 @@ export interface ServerOptions {
    * 環境變數 ALLOWED_HOSTS=a.example,b.example 也可設定。
    */
   allowedHosts?: string[] | false;
+  /**
+   * 允許當作 workspace 的根目錄（已 realpath）。預設讀環境變數 WORKSPACE_ROOTS（path.delimiter 分隔、支援 ~）；
+   * 空陣列 = 拒絕所有 workspace。
+   */
+  workspaceRoots?: string[];
 }
 
 interface ActiveRun {
@@ -65,6 +71,10 @@ interface StartBody {
   pass_on?: number;
   mock_delay_ms?: number;
   advanced?: boolean;
+  /** 這次 run 的 workspace（絕對路徑，必須在 WORKSPACE_ROOTS 內）；只傳給 workspace 權限 read / write 的 agent */
+  workspace?: string;
+  /** mock runtime 示範：coding agent 在 workspace 寫檔（agent-workflow-demo/），讓變更清單看得到東西 */
+  mock_writes?: boolean;
 }
 
 const WORKFLOW_ID = /^[A-Za-z0-9_-]+$/;
@@ -110,16 +120,23 @@ export function buildServer(opts: ServerOptions): FastifyInstance & { runs: Map<
     fs.writeFileSync(path.join(workflowsDir, `${id}.json`), JSON.stringify(out, null, 2) + '\n');
   };
 
-  function startRun(wf: WorkflowGraph, body: StartBody, extra: { workflow_id?: string; resume?: { fromRunId: string; events: RunEvent[] } } = {}) {
+  const workspaceRoots = opts.workspaceRoots ?? parseWorkspaceRoots();
+  /** undefined / null / '' = 沒有 workspace；否則驗證（失敗丟 WorkspaceError → 400） */
+  const workspaceOf = (w: unknown) => (w === undefined || w === null || w === '' ? undefined : resolveWorkspace(w, workspaceRoots));
+
+  async function startRun(wf: WorkflowGraph, body: StartBody, extra: { workflow_id?: string; resume?: { fromRunId: string; events: RunEvent[] } } = {}) {
     const advanced = adv(body.advanced);
-    const compiled = compileWorkflow(wf, registry, { advanced });
+    const workspace = workspaceOf(body.workspace);
+    const compiled = compileWorkflow(wf, registry, { advanced, workspace: !!workspace });
     if (!compiled.ok) return { error: { errors: compiled.errors, warnings: compiled.warnings } };
     const scenario = body.scenario ?? 'pass';
     const mock: AgentRuntime = demoRuntime({
       passOnIteration: scenario === 'fail' ? null : Number(body.pass_on ?? 2) || 2,
       flakyCoder: true,
       delayMs: Math.min(Math.max(Number(body.mock_delay_ms ?? opts.mockDelayMs ?? 250) || 0, 0), 10_000),
+      writeFile: body.mock_writes === true ? writeWorkspaceFile : undefined,
     });
+    const ws = workspace ? await beginWorkspace(workspace, compiled.workspace_required) : undefined;
     const rt = resolveRuntimeMode(opts.runtime);
     const runId = `run_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
     const inputs = body.inputs ?? { request: '修正 parser 空字串 bug 並讓測試通過', repository: 'github.com/acme/parser' };
@@ -134,6 +151,7 @@ export function buildServer(opts: ServerOptions): FastifyInstance & { runs: Map<
       scenario,
       inputs,
       resumed_from: extra.resume?.fromRunId,
+      ...(ws ? { workspace: ws.report } : {}),
     };
     const writer = store.begin(meta, wf);
     const active: ActiveRun = { meta, events: [], listeners: new Set(), ac: new AbortController(), done: Promise.resolve() };
@@ -151,12 +169,15 @@ export function buildServer(opts: ServerOptions): FastifyInstance & { runs: Map<
       services,
       signal: active.ac.signal,
       advanced,
+      workspace,
       resume: extra.resume ? { fromRunId: extra.resume.fromRunId, results: resumeResultsFromEvents(extra.resume.events) } : undefined,
     })
-      .then((result) => {
+      .then(async (result) => {
+        if (ws) meta.workspace = await ws.finish();
         active.meta = writer.finish(result, active.ac.signal.aborted ? 'cancelled' : result.status);
       })
-      .catch((e: Error) => {
+      .catch(async (e: Error) => {
+        if (ws) meta.workspace = await ws.finish().catch((err: Error) => ({ ...ws.report, error: err.message }));
         active.meta = writer.fail(e.message);
         onEvent({ seq: active.events.length + 1, ts: Date.now(), run_id: runId, type: 'run_completed', data: { status: 'failed', error: e.message } });
       })
@@ -167,8 +188,13 @@ export function buildServer(opts: ServerOptions): FastifyInstance & { runs: Map<
     return { run_id: runId, warnings: compiled.warnings };
   }
 
+  const workspaceErr = (e: unknown) => {
+    if (e instanceof WorkspaceError) return { workspaceError: { error: e.message, fix: e.fix } };
+    throw e;
+  };
+
   // ---------------------------------------------------------------- API
-  app.get('/api/health', async () => ({ ok: true, runtime: resolveRuntimeMode(opts.runtime), registry: registry.list().length, advanced: advancedDefault }));
+  app.get('/api/health', async () => ({ ok: true, runtime: resolveRuntimeMode(opts.runtime), registry: registry.list().length, advanced: advancedDefault, workspace_roots: workspaceRoots }));
 
   /** 預設只回 v1 節點（+ loop body 用的 internal 節點）；?advanced=1 回全部 */
   app.get<{ Querystring: { advanced?: string } }>('/api/registry', async (req) => ({
@@ -207,10 +233,18 @@ export function buildServer(opts: ServerOptions): FastifyInstance & { runs: Map<
     return { ok: true, id, warnings: r.warnings };
   });
 
-  app.post<{ Body: { workflow?: WorkflowGraph; advanced?: boolean } }>('/api/validate', async (req, reply) => {
+  /** body.workspace：有給就驗證路徑（400）並以「有 workspace」編譯；沒給只回報 workspace_required，不當成錯誤 */
+  app.post<{ Body: { workflow?: WorkflowGraph; advanced?: boolean; workspace?: string } }>('/api/validate', async (req, reply) => {
     if (!isPlainObject(req.body?.workflow)) return reply.code(400).send({ error: 'body.workflow (object) is required' });
-    const r = compileWorkflow(req.body.workflow, registry, { advanced: adv(req.body.advanced) });
-    return { ok: r.ok, errors: r.errors, warnings: r.warnings };
+    let workspace: string | undefined;
+    try {
+      workspace = workspaceOf(req.body.workspace);
+    } catch (e) {
+      if (e instanceof WorkspaceError) return reply.code(400).send({ error: e.message, fix: e.fix });
+      throw e;
+    }
+    const r = compileWorkflow(req.body.workflow, registry, { advanced: adv(req.body.advanced), workspace: workspace ? true : undefined });
+    return { ok: r.ok, errors: r.errors, warnings: r.warnings, workspace_required: r.workspace_required, workspace_nodes: r.workspace_nodes, ...(workspace ? { workspace } : {}) };
   });
 
   app.post<{ Body: StartBody }>('/api/runs', async (req, reply) => {
@@ -219,9 +253,11 @@ export function buildServer(opts: ServerOptions): FastifyInstance & { runs: Map<
     if (body.workflow !== undefined && !isPlainObject(body.workflow)) return reply.code(400).send({ error: 'workflow must be an object' });
     if (body.workflow_id !== undefined && typeof body.workflow_id !== 'string') return reply.code(400).send({ error: 'workflow_id must be a string' });
     if (body.inputs !== undefined && !isPlainObject(body.inputs)) return reply.code(400).send({ error: 'inputs must be an object' });
+    if (body.workspace !== undefined && body.workspace !== null && typeof body.workspace !== 'string') return reply.code(400).send({ error: 'workspace must be a string (absolute path)' });
     const wf = body.workflow ?? (body.workflow_id ? readWorkflow(body.workflow_id) : undefined);
     if (!wf) return reply.code(400).send({ error: 'workflow or a valid workflow_id is required' });
-    const r = startRun(wf, body, { workflow_id: body.workflow_id });
+    const r = await startRun(wf, body, { workflow_id: body.workflow_id }).catch(workspaceErr);
+    if ('workspaceError' in r) return reply.code(400).send(r.workspaceError);
     if ('error' in r) return reply.code(422).send({ error: 'workflow does not compile', ...r.error });
     return reply.code(202).send(r);
   });
@@ -257,7 +293,8 @@ export function buildServer(opts: ServerOptions): FastifyInstance & { runs: Map<
       for (const e of active.events) if (e.seq > last) (send(e), (last = e.seq));
       const listener = (e: RunEvent) => {
         if (e.seq > last) (send(e), (last = e.seq));
-        if (e.type === 'run_completed') {
+        // 等 finally 的關閉訊號（seq -1）才結束：此時 meta（含 workspace 變更清單）已寫好，client 收到 end 後 getRun 一定拿得到
+        if (e.seq === -1) {
           active.listeners.delete(listener);
           end();
         }
@@ -287,7 +324,12 @@ export function buildServer(opts: ServerOptions): FastifyInstance & { runs: Map<
     if (runs.get(id)?.meta.status === 'running') return reply.code(409).send({ error: 'run is still running' });
     const prev = store.get(id);
     if (!prev?.workflow) return reply.code(404).send({ error: 'run (or its saved workflow) not found' });
-    const r = startRun(prev.workflow, { scenario: prev.meta.scenario as 'pass' | 'fail', inputs: prev.meta.inputs, ...(req.body ?? {}) }, { workflow_id: prev.meta.workflow_id, resume: { fromRunId: id, events: prev.events } });
+    const r = await startRun(
+      prev.workflow,
+      { scenario: prev.meta.scenario as 'pass' | 'fail', inputs: prev.meta.inputs, workspace: prev.meta.workspace?.path, ...(req.body ?? {}) },
+      { workflow_id: prev.meta.workflow_id, resume: { fromRunId: id, events: prev.events } },
+    ).catch(workspaceErr);
+    if ('workspaceError' in r) return reply.code(400).send(r.workspaceError);
     if ('error' in r) return reply.code(422).send({ error: 'workflow does not compile', ...r.error });
     return reply.code(202).send({ ...r, resumed_from: id });
   });

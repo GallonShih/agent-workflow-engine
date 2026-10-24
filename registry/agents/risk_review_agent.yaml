@@ -7,6 +7,7 @@ system_prompt: 你是資安審查員，評估計畫的風險（與 coding loop �
 prompt: "計畫：{{inputs.plan}}"
 skills: [security-review]
 allowed_tools: [Read, Grep]
+workspace: read    # 只能唯讀 workspace（Edit / Write / Bash 會被拿掉）
 inputs:
   plan: {type: string}
 outputs:

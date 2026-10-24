@@ -5,7 +5,7 @@ import { compileWorkflow } from '../../src/compiler.js';
 import { runWorkflow } from '../../src/engine.js';
 import { convertToV1 } from '../../src/convert.js';
 import { demoRuntime } from '../../src/demo/scenario.js';
-import { ctl, data, n, registry, root, wf } from '../helpers.js';
+import { ctl, data, n, registry, root, wf, WS } from '../helpers.js';
 
 const fixture = (f: string) => JSON.parse(fs.readFileSync(path.join(root, 'test/advanced/fixtures', f), 'utf8'));
 
@@ -24,7 +24,7 @@ describe('legacy → v1 converter', () => {
     const { workflow } = convertToV1(fixture('fix-until-tests-pass.json'), registry());
     const c = compileWorkflow(workflow, registry());
     for (const [pass, expected, endId] of [[2, 'success', 'end_ok'], [null, 'failed', 'end_fail']] as const) {
-      const res = await runWorkflow(c.graph!, { request: 'x', repository: 'y' }, { runtime: demoRuntime({ passOnIteration: pass, flakyCoder: false }), runId: 'r' });
+      const res = await runWorkflow(c.graph!, { request: 'x', repository: 'y' }, { runtime: demoRuntime({ passOnIteration: pass, flakyCoder: false }), runId: 'r', workspace: WS });
       expect(res.status).toBe(expected);
       expect(res.records.find((r) => r.key === `r/root/${endId}`)!.status).toBe('success');
     }

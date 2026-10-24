@@ -16,10 +16,12 @@ npm run test:v1          # 只跑 v1 + MCP
 npm run test:advanced    # 只跑進階功能（test/advanced/）
 npm run typecheck        # tsc（根目錄）；前端：cd web && npx tsc -p .
 
+export WORKSPACE_ROOTS=~/code   # 允許 agent 操作的目錄（見下方「Workspace」）；沒設定時所有 workspace 都會被拒絕
 npm start                # build 前端後由後端直接提供 → http://127.0.0.1:3001
 npm run dev              # 開發：後端 :3001 + Vite :5173（/api proxy 到後端）
 
-npm run demo             # CLI：planning → coding ⇄ testing（loop，第 3 輪通過）→ report
+npm run demo             # CLI：planning → coding ⇄ testing（loop，第 3 輪通過）→ report；沒給 --workspace 時用暫存目錄
+npm run demo -- --workspace ~/code/my-repo --mock-writes   # 指定 workspace（需在 WORKSPACE_ROOTS 內）
 npm run validate -- workflows/invalid-example.json   # compiler 列出錯誤，每個都附修正建議
 npm run convert -- workflows/old.json                # 舊格式（control edges）→ v1
 npm run mcp              # MCP server（stdio）
@@ -83,6 +85,31 @@ v1 只有 **6 個概念**：**節點**、**有型別的 port**、**資料連線*
 - 測試在 `test/advanced/`（`npm run test:advanced`）。
 - 舊檔轉 v1：`npm run convert -- <file>`（`convertToV1`：control edge 拿掉、condition 分支改成資料分流、`carry` 改成同名自動帶入；轉不了的會列在 notes）。
 
+## Workspace（agent 操作的本機 repo / 目錄）
+
+每次 run 可以指定一個 **workspace**：本機 repo 或目錄的絕對路徑。agent 會**直接在這個目錄裡**工作（沒有複製、沒有 git worktree）。
+
+- **指定方式**：REST `POST /api/runs {"workspace": "/abs/path"}`、MCP `run_workflow` 的 `workspace`、CLI `--workspace`、Web UI 工具列的 workspace 欄位（記在 localStorage）。
+- **白名單 `WORKSPACE_ROOTS`**：用 `:` 分隔（Windows 用 `;`），支援 `~`，例如 `WORKSPACE_ROOTS=~/code:/srv/repos`。workspace 會先解析 symlink（realpath），必須存在、是目錄、而且在某個 root 底下；否則 REST 回 `400 {error, fix}`、MCP 回 tool error（附 `fix`）。`..` 穿越、同前綴的兄弟目錄（`/root-evil`）、指向外面的 symlink 都會被擋。**沒設定 `WORKSPACE_ROOTS` 時拒絕所有 workspace**，錯誤訊息會說明怎麼設定。
+- **節點權限（registry 層級，workflow 不能覆寫）**：node definition 的 `workspace: none | read | write`（預設 none）。`workspace` 跟 `allowed_tools` 一樣是鎖定欄位，實例 config 想改會得到 `POLICY_OVERRIDE`。
+
+  | 權限 | 執行時 | 內建 agent |
+  |---|---|---|
+  | `none` | 不給 workingDirectory；拿掉所有檔案 / Bash 工具（Read、Grep、Glob、LS、Edit、Write、Bash…） | 測試用小節點 |
+  | `read` | workingDirectory = workspace；只留唯讀工具，拿掉 Edit / MultiEdit / Write / Bash / NotebookEdit | planning / risk_review / report |
+  | `write` | workingDirectory = workspace；`allowed_tools` 照定義 | coding / testing |
+
+- **沒有 workspace 時**：workflow 裡有 read / write agent 就編譯失敗（`WORKSPACE_REQUIRED`，附修正建議）；直接呼叫 engine 時，這些節點會失敗並寫明原因。不再退回 `process.cwd()`。`POST /api/validate` 會回報 `workspace_required`，UI 會在欄位旁顯示「需要 workspace（write）」。
+- **Claude runtime 的對應**（依 `@anthropic-ai/claude-agent-sdk` 的 `sdk.d.ts`）：`cwd` = workspace（none 用一個空的暫存目錄）、`tools` = 過濾後的工具（`[]` = 關掉所有內建工具）、`disallowedTools` = 被權限拿掉的工具、`permissionMode` = write 用 `acceptEdits`，none / read 用 `dontAsk`（沒在 allowedTools 的一律拒絕，不跳詢問）。實作在 `src/runtime/claude.ts#sdkPermissionOptions` 與 vendored `ClaudeAgent` 的 PoC patch 4。
+- **⚠ Bash 沒有被 sandbox 在 workspace 內。** `cwd` 只是起始目錄，write 權限的 agent（coding / testing）用 Bash 仍可讀寫 workspace 以外的檔案。真正的隔離需要 container / VM，v1 沒做。
+- **監控**：run 紀錄（`meta.workspace`）包含 workspace 路徑、開始時的 git branch / HEAD；run 結束後列出**這次 run 期間**變更的檔案（added / modified / deleted，含 +/− 行數）與 diff stat。
+  - git repo：以開始時的 HEAD 為基準（`git diff --name-status/--numstat <HEAD>` + untracked），開始前就已經 dirty、run 期間沒再動的檔案不列；run 期間的 commit 也算（`head_after` 會不同）。git 指令會關掉 fsmonitor / hooks / 外部 diff / textconv。
+  - 非 git 目錄：前後各做一次快照（size + mtime，1 MB 以下算 sha1），最多 5000 個檔案（略過 `.git`、`node_modules`），變更清單最多 500 筆；超過會標「已截斷」。修改的檔案沒有行數。
+  - UI 的執行監控有 Workspace 區塊（路徑、branch@HEAD、變更檔案、diff stat），執行紀錄列表顯示 workspace 名稱與變更數；MCP `get_run` 回傳 `workspace`。
+- **mock 寫檔示範**：mock runtime 不會碰檔案；`mock_writes: true`（UI「mock 寫檔」、CLI `--mock-writes`）時，mock coding agent 會在 `<workspace>/agent-workflow-demo/` 寫 `iteration-N.md` 與 `CHANGELOG.md`（只在權限為 write 且有 Write 工具時），讓變更清單有內容。
+
+截圖：`screenshots/13-workspace-run.png`（workspace 欄位、mock 寫檔、run 完成後的變更清單、執行紀錄的 workspace 摘要、Log 裡的 WORKSPACE_REQUIRED / 白名單錯誤）。
+
 ## MCP server
 
 讓 Claude Desktop / Claude Code / Cursor 等 MCP client 直接查節點、寫 workflow、驗證、執行、讀結果。server 的 `instructions` 內含 v1 DSL 說明。
@@ -94,13 +121,13 @@ v1 只有 **6 個概念**：**節點**、**有型別的 port**、**資料連線*
 | `list_workflows` / `get_workflow` | `workflows/*.json` |
 | `validate_workflow` | compiler 結果；每個錯誤附 `fix` |
 | `save_workflow` | 驗證通過才存成 `workflows/<id>.json` |
-| `run_workflow` | 啟動執行，回 `run_id`（非同步） |
-| `get_run` | 狀態、每個節點的 status / 輸出摘要、token、錯誤 |
+| `run_workflow` | 啟動執行，回 `run_id`（非同步）；`workspace` = agent 操作的目錄（需在 `WORKSPACE_ROOTS` 內）、`mock_writes` |
+| `get_run` | 狀態、每個節點的 status / 輸出摘要、token、錯誤；`workspace`（路徑、git branch / HEAD、變更檔案、diff stat） |
 | `cancel_run` | 取消執行中的 run |
 
 **stdio**（預設在同一個 process 內建立 backend，不開 port；runs 一樣寫到 `.runs/`，UI 的執行紀錄看得到）：
 
-- 環境變數：`WORKFLOW_BACKEND_URL=http://127.0.0.1:3001`（改成呼叫已在跑的後端，UI 可即時看到 MCP 啟動的 run）、`WORKFLOW_DIR`、`WORKFLOW_RUNS_DIR`、`MOCK_DELAY_MS`。
+- 環境變數：`WORKSPACE_ROOTS`（允許的 workspace 根目錄，見上方）、`WORKFLOW_BACKEND_URL=http://127.0.0.1:3001`（改成呼叫已在跑的後端，UI 可即時看到 MCP 啟動的 run）、`WORKFLOW_DIR`、`WORKFLOW_RUNS_DIR`、`MOCK_DELAY_MS`。
 - 下面的 `/path/to/agent-workflow-engine` 換成你 clone 的絕對路徑。
 
 Claude Desktop（`claude_desktop_config.json`）：
@@ -110,7 +137,8 @@ Claude Desktop（`claude_desktop_config.json`）：
   "mcpServers": {
     "agent-workflow": {
       "command": "npx",
-      "args": ["tsx", "/path/to/agent-workflow-engine/src/mcp/stdio.ts"]
+      "args": ["tsx", "/path/to/agent-workflow-engine/src/mcp/stdio.ts"],
+      "env": { "WORKSPACE_ROOTS": "/Users/me/code" }
     }
   }
 }
@@ -119,7 +147,7 @@ Claude Desktop（`claude_desktop_config.json`）：
 Claude Code：
 
 ```bash
-claude mcp add agent-workflow -- npx tsx /path/to/agent-workflow-engine/src/mcp/stdio.ts
+claude mcp add agent-workflow -e WORKSPACE_ROOTS=~/code -- npx tsx /path/to/agent-workflow-engine/src/mcp/stdio.ts
 # 或接到已在跑的後端（Streamable HTTP）
 claude mcp add --transport http agent-workflow http://127.0.0.1:3001/mcp
 ```
@@ -146,9 +174,10 @@ Cursor（專案的 `.cursor/mcp.json` 或 `~/.cursor/mcp.json`）：
 - **屬性面板**：依 `config_schema` 產生設定表單；agent 的 runtime / model / prompt / allowed tools 以 🔒 唯讀顯示，只有 `max_turns`、`timeout_seconds`、`retry` 可改；動態 ports 可新增 / 刪除 / 改型別；即時驗證，錯誤以紅色 badge 標在節點上，Diagnostics 顯示修正建議。
 - **執行監控**：透過 SSE 即時上色；點節點看 Status / Input / Output / Agent Events / Duration / Tokens；loop 有 iteration 選擇器；**雙擊 loop 進入 body** 編輯或查看每一輪。
 - **執行紀錄**：列出 `.runs/` 的 run，可開啟、用時間軸 replay、取消。
+- **Workspace**：工具列輸入 workspace 路徑（記在 localStorage），workflow 需要時欄位旁會提示；執行監控顯示 workspace、git branch@HEAD 與 run 結束後的變更檔案。
 - **開啟「進階功能」後**：多層 drill-down（巢狀 loop、foreach、subflow 唯讀 drill-in）、resume、瀏覽器內執行（沒有後端時）。
 
-截圖（headless Chrome 實測，`screenshots/`）：`11-v1-editor.png`（v1 編輯器 + agent 屬性面板 + v1 JSON）、`12-v1-monitor.png`（v1 run 完成、loop 3 輪）。`01`–`10` 是進階 / 舊格式時期的截圖（屬性面板、驗證錯誤、監控、replay、resume、巢狀 loop、subflow）。
+截圖（headless Chrome 實測，`screenshots/`）：`13-workspace-run.png`（workspace 欄位 + 變更清單）、`11-v1-editor.png`（v1 編輯器 + agent 屬性面板 + v1 JSON）、`12-v1-monitor.png`（v1 run 完成、loop 3 輪）。`01`–`10` 是進階 / 舊格式時期的截圖（屬性面板、驗證錯誤、監控、replay、resume、巢狀 loop、subflow）。
 
 ### UI 細節（屬性面板、監控、巢狀 drill-down）
 
@@ -184,12 +213,12 @@ Cursor（專案的 `.cursor/mcp.json` 或 `~/.cursor/mcp.json`）：
 
 | Method | Path | 說明 |
 |---|---|---|
-| GET | `/api/health` | 狀態 + 目前 runtime（mode / reason）+ registry 節點數 |
+| GET | `/api/health` | 狀態 + 目前 runtime（mode / reason）+ registry 節點數 + `workspace_roots` |
 | GET | `/api/registry` | 節點定義；預設只回 v1 節點，`?advanced=1` 回全部 |
 | GET | `/api/workflows`、`/api/workflows/:id` | `workflows/*.json` |
 | PUT | `/api/workflows/:id[?advanced=1]` | 存回 `workflows/<id>.json`；有驗證錯誤回 `422`（避免把被 subflow 引用的 workflow 存成跑不動的版本） |
-| POST | `/api/validate` | `{workflow, advanced?}` → compiler 的 errors / warnings（每個都附 `fix` 修正建議） |
-| POST | `/api/runs` | `{workflow \| workflow_id, inputs, scenario, pass_on, mock_delay_ms}` → `202 {run_id}`；編譯失敗回 `422` |
+| POST | `/api/validate` | `{workflow, advanced?, workspace?}` → compiler 的 errors / warnings（每個都附 `fix` 修正建議）+ `workspace_required` |
+| POST | `/api/runs` | `{workflow \| workflow_id, inputs, scenario, pass_on, mock_delay_ms, workspace?, mock_writes?}` → `202 {run_id}`；workspace 不合法回 `400 {error, fix}`；編譯失敗（含 `WORKSPACE_REQUIRED`）回 `422` |
 | GET | `/api/runs`、`/api/runs/:id` | 執行紀錄列表；單一 run 的 meta + workflow + events + records |
 | GET | `/api/runs/:id/events` | SSE（`event: run`、`id: seq`）；支援 `?after=` / `Last-Event-ID`，先補發歷史再即時推送，結束時送 `event: end` |
 | POST | `/api/runs/:id/cancel` | 取消執行中的 run（AbortSignal 傳到 agent / HTTP / delay） |
@@ -241,13 +270,16 @@ workflow JSON ◄── Rete editor (web/) ────┘ 同一份 compiler、
 - Claude runtime 沒有用真 API key 跑過；MCP 設定檔載入、skills 掛載未做。Planner（`npm run plan`）的生成器是 mock。
 - 後端與 MCP HTTP endpoint 沒有帳號驗證 / 多使用者（只有 Host header 檢查），預設只聽 127.0.0.1，不要直接對外開放；`.runs/` 是 JSON 檔，沒有 DB。
 - UI 載入 workflow 時，畫不出來的 edge（例如接到不存在的 port）會略過並寫在 Log，不會保留在畫布上。
-- 沒有 git worktree / container 隔離真實 coding agent。
+- 沒有 git worktree / container 隔離：agent 直接在你指定的 workspace 裡工作；**Bash 沒有被限制在 workspace 內**（`cwd` 只是起始目錄）。工具權限（none / read / write）只在 Claude runtime 透過 SDK 的 `tools` / `disallowedTools` / `permissionMode` 生效，Claude runtime 本身仍沒用真 API key 跑過。
+- 變更清單是 run 前後的快照比對：同一個 workspace 同時跑多個 run、或使用者在 run 期間自己改檔，都會被算進去；git 的 +/− 行數以開始時的 HEAD 為基準（開始前就 dirty、run 期間又改的檔案，行數包含原本的修改）；非 git 目錄修改的檔案沒有行數，超過 5000 個檔案會截斷。
+- 瀏覽器內執行（進階）不驗證 workspace 路徑（只有 mock agents，不碰檔案）。
 - v1 範圍審查與簡化理由：`docs/v1-scope-review.md`。
 
 ## 目錄
 
 ```
-src/            dsl（v1 解析 / 序列化）、registry、compiler、fixes（修正建議）、convert（舊格式 → v1）、engine、planner、runtime/
+src/            dsl（v1 解析 / 序列化）、registry、compiler、fixes（修正建議）、convert（舊格式 → v1）、engine、planner、runtime/、
+                workspace.ts（WORKSPACE_ROOTS / 快照 / 變更清單，node 專用）、workspace-policy.ts（權限 → 工具，瀏覽器也可用）
 src/mcp/        MCP server（tools、stdio、backend 介面）
 src/server/     Fastify app（含 POST /mcp）、RunStore（.runs/）
 src/nodes/      builtin 節點實作

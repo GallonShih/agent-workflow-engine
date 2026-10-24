@@ -6,6 +6,7 @@ import { runWorkflow } from './adv.js';
 import { demoRuntime } from '../../src/demo/scenario.js';
 import { loadRegistry } from '../../src/registry-fs.js';
 import type { WorkflowGraph } from '../../src/types.js';
+import { WS } from '../helpers.js';
 
 const registry = loadRegistry(path.join(import.meta.dirname, '../../registry/builtin'), path.join(import.meta.dirname, '../../registry/agents'));
 const template: WorkflowGraph = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, 'fixtures/fix-until-tests-pass.json'), 'utf8'));
@@ -27,7 +28,7 @@ describe('Phase 4 planner (prototype)', () => {
     expect(codes).toContain('UNKNOWN_NODE_TYPE');
     expect(codes).toContain('POLICY_OVERRIDE');
     expect(res.workflow!.nodes.find((n) => n.type === 'loop')!.config!.max_iterations).toBe(3);
-    const run = await runWorkflow(res.compiled!.graph!, { request: 'x', repository: 'y' }, { runtime: demoRuntime({ passOnIteration: 2 }) });
+    const run = await runWorkflow(res.compiled!.graph!, { request: 'x', repository: 'y' }, { runtime: demoRuntime({ passOnIteration: 2 }), workspace: WS });
     expect(run.status).toBe('success');
   });
 

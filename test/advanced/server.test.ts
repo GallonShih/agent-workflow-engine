@@ -5,10 +5,10 @@ import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildServer } from '../../src/server/app.js';
 import type { NodeRunRecord, RunEvent } from '../../src/types.js';
-import { root } from '../helpers.js';
+import { root, WS } from '../helpers.js';
 
 const runsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wf-runs-'));
-const app = buildServer({ root, advanced: true, runsDir, mockDelayMs: 0, workflowsDir: path.join(root, 'test/advanced/fixtures') });
+const app = buildServer({ root, advanced: true, runsDir, mockDelayMs: 0, workflowsDir: path.join(root, 'test/advanced/fixtures'), workspaceRoots: [WS] });
 let base = '';
 
 beforeAll(async () => {
@@ -18,7 +18,7 @@ beforeAll(async () => {
 afterAll(() => app.close());
 
 const startRun = async (payload: Record<string, unknown>) => {
-  const r = await app.inject({ method: 'POST', url: '/api/runs', payload });
+  const r = await app.inject({ method: 'POST', url: '/api/runs', payload: { workspace: WS, ...payload } });
   expect(r.statusCode).toBe(202);
   return r.json().run_id as string;
 };
@@ -117,12 +117,12 @@ describe('backend API (Fastify)', () => {
 describe('nested-review demo + workflow save (backend)', () => {
   const wfDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wf-dir-'));
   for (const f of fs.readdirSync(path.join(root, 'test/advanced/fixtures'))) fs.copyFileSync(path.join(root, 'test/advanced/fixtures', f), path.join(wfDir, f));
-  const app2 = buildServer({ root, advanced: true, runsDir: fs.mkdtempSync(path.join(os.tmpdir(), 'wf-runs2-')), mockDelayMs: 0, workflowsDir: wfDir });
+  const app2 = buildServer({ root, advanced: true, runsDir: fs.mkdtempSync(path.join(os.tmpdir(), 'wf-runs2-')), mockDelayMs: 0, workflowsDir: wfDir, workspaceRoots: [WS] });
   afterAll(() => app2.close());
 
   it('runs subflow + nested loops; run record keeps the subflow snapshot and outer#i/inner#j records', async () => {
     const wf = (await app2.inject('/api/workflows/nested-review')).json();
-    const r = await app2.inject({ method: 'POST', url: '/api/runs', payload: { workflow: wf, workflow_id: 'nested-review', inputs: { request: 'x', repository: 'y' } } });
+    const r = await app2.inject({ method: 'POST', url: '/api/runs', payload: { workflow: wf, workflow_id: 'nested-review', inputs: { request: 'x', repository: 'y' }, workspace: WS } });
     expect(r.statusCode).toBe(202);
     const id = r.json().run_id as string;
     await app2.runs.get(id)!.done;

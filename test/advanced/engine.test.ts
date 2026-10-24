@@ -6,12 +6,12 @@ import { runWorkflow } from './adv.js';
 import { MockAgentRuntime, sleep } from '../../src/runtime/mock.js';
 import { demoRuntime } from '../../src/demo/scenario.js';
 import type { WorkflowGraph } from '../../src/types.js';
-import { ctl, data, n, registry, root, wf } from '../helpers.js';
+import { ctl, data, n, registry, root, wf, WS } from '../helpers.js';
 
 async function run(w: WorkflowGraph, runtime: MockAgentRuntime, inputs: Record<string, unknown> = {}) {
   const c = compileWorkflow(w, registry());
   expect(c.errors).toEqual([]);
-  const res = await runWorkflow(c.graph!, inputs, { runtime, runId: 'r1' });
+  const res = await runWorkflow(c.graph!, inputs, { runtime, runId: 'r1', workspace: WS });
   const rec = (key: string) => res.records.find((r) => r.key === `r1/${key}`)!;
   return { res, rec };
 }

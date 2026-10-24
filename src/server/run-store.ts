@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import type { WorkspaceReport } from '../workspace-policy.js';
 import type { NodeRunRecord, RunEvent, RunResult, WorkflowGraph } from '../types.js';
 
 export type RunStatus = 'running' | 'success' | 'failed' | 'cancelled' | 'interrupted';
@@ -18,6 +19,8 @@ export interface RunMeta {
   scenario?: string;
   inputs?: Record<string, unknown>;
   resumed_from?: string;
+  /** 這次 run 的 workspace：路徑、git branch / HEAD、結束後的變更檔案與 diff stat */
+  workspace?: WorkspaceReport;
   /** 只有事件、沒有 meta 的舊 run（iteration 1 的 CLI 產物） */
   legacy?: boolean;
 }

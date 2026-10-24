@@ -6,7 +6,7 @@ import { runWorkflow } from '../../src/engine.js';
 import { MockAgentRuntime, sleep } from '../../src/runtime/mock.js';
 import { demoRuntime } from '../../src/demo/scenario.js';
 import type { WorkflowNode } from '../../src/types.js';
-import { n, registry, root } from '../helpers.js';
+import { n, registry, root, WS } from '../helpers.js';
 import { runV1, v1 } from './v1helpers.js';
 
 const gate = (op: string, value?: unknown) => n('g', 'condition', { config: { rule: { op, value } } });
@@ -51,7 +51,7 @@ describe('engine (DSL v1: data edges only)', () => {
       );
       const c = compileWorkflow(w, registry());
       expect(c.errors).toEqual([]);
-      const res = await runWorkflow(c.graph!, {}, { runtime: rt, runId: 'r' });
+      const res = await runWorkflow(c.graph!, {}, { runtime: rt, runId: 'r', workspace: WS });
       const done = res.records.find((r) => r.key === 'r/root/done')!;
       expect(done.status).toBe('success');
       expect(JSON.stringify(done)).toContain(count > 5 ? '"big"' : '"small"');

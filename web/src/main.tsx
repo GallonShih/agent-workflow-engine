@@ -10,7 +10,7 @@ import demoWorkflow from '../../workflows/fix-until-tests-pass.json';
 import { loadBrowserRegistry } from './registry-browser.js';
 import { createEditor, type EditorApi } from './editor.js';
 import { PropertiesPanel } from './properties.js';
-import { NodeRunPanel, RunHistory, RunSummary, Badge } from './monitor-panel.js';
+import { NodeRunPanel, RunHistory, RunSummary, Badge, WorkspacePanel } from './monitor-panel.js';
 import { applyEvent, emptyRun, iterationsOf, reduceEvents, resolveScope, scopeKeyOf, statusesFor, type RunView } from './monitor.js';
 import { backend, type RunMeta } from './api.js';
 import { DiagnosticsList, NodeLibrary, Tabs } from './panels.js';
@@ -18,6 +18,8 @@ import { norm, resolveView, toFile, type Crumb } from './view.js';
 
 const STORAGE_KEY = 'agent-workflow-poc:workflow:v1';
 const ADV_KEY = 'agent-workflow-poc:advanced';
+const WORKSPACE_KEY = 'agent-workflow-poc:workspace';
+const MOCK_WRITES_KEY = 'agent-workflow-poc:mock-writes';
 const registry = loadBrowserRegistry();
 const clone = <T,>(x: T): T => JSON.parse(JSON.stringify(x));
 const DEMO_INPUTS = { request: '修正 parser 空字串 bug 並讓測試通過', repository: 'github.com/acme/parser' };
@@ -63,8 +65,13 @@ function App() {
   const [, setTick] = useState(0);
   const [running, setRunning] = useState(false);
   const [mode, setMode] = useState<'backend' | 'browser'>('browser');
-  const [backendInfo, setBackendInfo] = useState<{ runtime: { mode: string; reason: string } } | null>(null);
+  const [backendInfo, setBackendInfo] = useState<{ runtime: { mode: string; reason: string }; workspace_roots?: string[] } | null>(null);
   const [scenario, setScenario] = useState<'pass' | 'fail'>('pass');
+  // per-run workspace（記在 localStorage）；必須在 server 的 WORKSPACE_ROOTS 內
+  const [workspace, setWorkspaceState] = useState(() => localStorage.getItem(WORKSPACE_KEY) ?? '');
+  const setWorkspace = (v: string) => (setWorkspaceState(v), localStorage.setItem(WORKSPACE_KEY, v));
+  const [mockWrites, setMockWritesState] = useState(() => localStorage.getItem(MOCK_WRITES_KEY) === '1');
+  const setMockWrites = (v: boolean) => (setMockWritesState(v), localStorage.setItem(MOCK_WRITES_KEY, v ? '1' : '0'));
   const [runs, setRuns] = useState<RunMeta[] | null>(null);
   const [activeRun, setActiveRun] = useState<RunMeta | null>(null);
   const [replay, setReplay] = useState<{ pos: number; total: number } | null>(null);
@@ -314,7 +321,9 @@ function App() {
     }
     if (mode === 'backend') {
       try {
-        const { run_id } = await backend.startRun({ workflow: toFile(wfRef.current), scenario, mock_delay_ms: 300, inputs: DEMO_INPUTS, advanced: advRef.current });
+        const ws = workspace.trim() || undefined;
+        const { run_id } = await backend.startRun({ workflow: toFile(wfRef.current), scenario, mock_delay_ms: 300, inputs: DEMO_INPUTS, advanced: advRef.current, workspace: ws, mock_writes: mockWrites });
+        if (ws) log(`📁 workspace：${ws}${mockWrites ? '（mock 寫檔示範開啟）' : ''}`);
         log(`▶ backend run ${run_id}（SSE 串流中）`);
         attachStream(run_id);
       } catch (e) {
@@ -327,6 +336,8 @@ function App() {
     const result = await runWorkflow(r.graph, DEMO_INPUTS, {
       runtime: demoRuntime({ passOnIteration: scenario === 'pass' ? 2 : null, flakyCoder: true, delayMs: 250 }),
       onEvent: onRunEvent,
+      // 瀏覽器內只有 mock agents（不碰檔案系統）：workspace 只用來滿足 read / write 權限檢查，不會驗證路徑
+      workspace: workspace.trim() || undefined,
       // subflow 在瀏覽器模式：從 backend 或打包的 workflows/*.json 載入，用瀏覽器端 registry 編譯
       services: {
         fetch: window.fetch.bind(window),
@@ -345,6 +356,8 @@ function App() {
   function attachStream(id: string) {
     setActiveRun({ run_id: id, workflow_name: wfRef.current.name ?? '', status: 'running', started_at: Date.now(), source: 'server', runtime: backendInfo?.runtime.mode ?? 'mock' });
     setRunning(true);
+    // 執行中也顯示 workspace 路徑 / git branch（變更清單在結束後的 getRun）
+    void backend.getRun(id).then((r) => setActiveRun((cur) => (cur?.run_id === id && cur.status === 'running' ? r.meta : cur))).catch(() => undefined);
     stopStream.current = backend.stream(id, onRunEvent, () => {
       setRunning(false);
       void refreshRuns();
@@ -497,6 +510,7 @@ function App() {
     ? { ...selDef, config_schema: { ...selDef.config_schema, properties: Object.fromEntries(Object.entries((selDef.config_schema.properties ?? {}) as Record<string, unknown>).filter(([k]) => !['carry', 'on_body_failure'].includes(k))) } }
     : selDef;
   const btn = { padding: '5px 9px', cursor: 'pointer' } as const;
+  const wsMissing = !workspace.trim() && !!diag?.workspace_required && diag.workspace_required !== 'none';
   const run_ = runRef.current;
   const scope = resolveScope(run_, path.map((c) => c.id), picks);
 
@@ -519,6 +533,20 @@ function App() {
           <option value="pass">情境：第 3 輪測試通過</option>
           <option value="fail">情境：測試永遠失敗</option>
         </select>
+        <input
+          data-testid="workspace-input"
+          value={workspace}
+          onChange={(e) => setWorkspace(e.target.value)}
+          placeholder="workspace 絕對路徑（WORKSPACE_ROOTS 內）"
+          title={backendInfo?.workspace_roots?.length ? `WORKSPACE_ROOTS：${backendInfo.workspace_roots.join('、')}` : 'server 沒有設定 WORKSPACE_ROOTS → 所有 workspace 都會被拒絕'}
+          style={{ ...btn, width: 270, fontFamily: 'monospace', borderColor: wsMissing ? '#dc2626' : undefined }}
+        />
+        {wsMissing && <span data-testid="workspace-required" style={{ color: '#b91c1c' }}>需要 workspace（{diag?.workspace_required}）</span>}
+        {backendInfo?.runtime.mode === 'mock' && (
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }} title="mock coding agent 會在 workspace/agent-workflow-demo/ 寫檔，用來示範變更清單">
+            <input data-testid="mock-writes" type="checkbox" checked={mockWrites} onChange={(e) => setMockWrites(e.target.checked)} /> mock 寫檔
+          </label>
+        )}
         <button data-testid="run" style={{ ...btn, background: '#2563eb', color: '#fff', border: 0, borderRadius: 4 }} disabled={running} onClick={() => void run()}>▶ 執行</button>
         {running && mode === 'backend' && <button style={btn} onClick={() => void cancel()}>■ 停止</button>}
         <span style={{ borderLeft: '1px solid #ddd', height: 22 }} />
@@ -656,6 +684,7 @@ function App() {
                 {activeRun.status !== run_.status && activeRun.status !== 'running' && <Badge status={activeRun.status} />}
               </div>
             )}
+            {rightTab === 'run' && activeRun && <WorkspacePanel ws={activeRun.workspace} running={running} />}
           </div>
           <div style={{ overflow: 'auto', minHeight: 0 }}>
             {!selNode && (

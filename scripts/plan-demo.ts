@@ -5,6 +5,7 @@ import { loadRegistry } from '../src/registry-fs.js';
 import { mockPlanGenerator, planWorkflow } from '../src/planner.js';
 import { runWorkflow } from '../src/engine.js';
 import { demoRuntime } from '../src/demo/scenario.js';
+import os from 'node:os';
 
 const root = path.resolve(import.meta.dirname, '..');
 const registry = loadRegistry(path.join(root, 'registry/builtin'), path.join(root, 'registry/agents'));
@@ -19,5 +20,5 @@ for (const a of res.attempts) {
 if (!res.ok) process.exit(1);
 const loop = res.workflow!.nodes.find((n) => n.type === 'loop');
 console.log(`planner 產生 ${res.workflow!.nodes.length} 個節點；loop max_iterations=${loop?.config?.max_iterations}`);
-const run = await runWorkflow(res.compiled!.graph!, { request: goal, repository: 'github.com/acme/parser' }, { runtime: demoRuntime({ passOnIteration: 2 }) });
+const run = await runWorkflow(res.compiled!.graph!, { request: goal, repository: 'github.com/acme/parser' }, { runtime: demoRuntime({ passOnIteration: 2 }), workspace: fs.mkdtempSync(path.join(os.tmpdir(), 'awf-plan-workspace-')) });
 console.log(`run ${run.run_id} → ${run.status.toUpperCase()}`);

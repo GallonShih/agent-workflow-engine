@@ -10,6 +10,7 @@ import { validateValue } from './schema.js';
 import { interpolateReferences } from './vendor/circuit/orchestrator/references.js';
 import type { AgentEvent, AgentConfig, LoopConfig, NodeRunRecord, NodeStatus, RunEvent, RunResult, Scope, TokenUsage } from './types.js';
 import type { AgentRuntime } from './runtime/types.js';
+import { permissionOf, toolsFor } from './workspace-policy.js';
 
 /**
  * Hybrid Workflow Runtime（Phase 2）
@@ -59,7 +60,11 @@ export interface RunOptions {
   /** 依 node definition 選 runtime（例如 claude_agent_sdk 但沒有 API key → mock） */
   selectRuntime?: (def: CompiledNode['def']) => AgentRuntime;
   runId?: string;
-  workingDirectory?: string;
+  /**
+   * 這次 run 的 workspace（已驗證過的絕對路徑，見 workspace.ts#resolveWorkspace）。
+   * 只傳給 workspace 權限 read / write 的 agent；沒有 workspace 時這些 agent 直接失敗（不會退回 process.cwd()）。
+   */
+  workspace?: string;
   onEvent?: (e: RunEvent) => void;
   /** 有副作用節點用的外部服務（fetch / 沙盒 fs / 載入子 workflow） */
   services?: RunServices;
@@ -511,6 +516,11 @@ export class GraphRun {
     if (cached) {
       return { outputs: cached.outputs, fire: cached.fired, record: { attempts: 0, runtime: 'resumed', resumed_from: this.ctx.opts.resume!.fromRunId } };
     }
+    const access = permissionOf(def);
+    const workspace = this.ctx.opts.workspace;
+    if (access !== 'none' && !workspace)
+      throw new Error(`node "${cn.id}" (${def.name}) needs ${access} access to a workspace but this run has none — pass "workspace": "/absolute/path" (inside WORKSPACE_ROOTS)`);
+    const tools = toolsFor(access, def.allowed_tools);
     const runtime = this.ctx.opts.selectRuntime?.(def) ?? this.ctx.opts.runtime;
     const prompt = interpolateReferences(def.prompt ?? '', new Map([['inputs', inputs]]), new Map([['inputs', 'inputs']]));
     const outputSchema = {
@@ -534,7 +544,7 @@ export class GraphRun {
       try {
         if (outer?.aborted) throw new Error('run cancelled');
         const res = await Promise.race([
-          runtime.run({ def, nodeId: cn.id, inputs, prompt, outputSchema, scope: this.scope, iteration, attempt, signal: ac.signal, workingDirectory: this.ctx.opts.workingDirectory ?? (globalThis as { process?: { cwd(): string } }).process?.cwd() ?? '/' }),
+          runtime.run({ def, nodeId: cn.id, inputs, prompt, outputSchema, scope: this.scope, iteration, attempt, signal: ac.signal, workingDirectory: access === 'none' ? undefined : workspace, workspaceAccess: access, allowedTools: tools.allowed, disallowedTools: tools.removed }),
           new Promise<never>((_, rej) => (timer = setTimeout(() => { ac.abort(); rej(new Error(`timeout after ${timeoutMs}ms`)); }, timeoutMs))),
         ]);
         events.push(...res.events);
@@ -546,7 +556,7 @@ export class GraphRun {
         }
         const v = validateValue(outputSchema, res.outputs);
         if (!v.ok) throw new Error(`structured output failed schema validation: ${v.errors}`);
-        return { outputs: res.outputs, fire: ['success'], record: { attempts: attempt, token_usage: usage, runtime: runtime.name, agent_events: events } };
+        return { outputs: res.outputs, fire: ['success'], record: { attempts: attempt, token_usage: usage, runtime: runtime.name, agent_events: events, workspace_access: access } };
       } catch (e) {
         lastErr = (e as Error).message;
         events.push({ type: 'error', message: lastErr });

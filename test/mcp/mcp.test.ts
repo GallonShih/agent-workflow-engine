@@ -10,12 +10,12 @@ import { buildServer } from '../../src/server/app.js';
 import { createMcpServer, summarizeRun, TOOLS } from '../../src/mcp/server.js';
 import { httpBackend, injectBackend } from '../../src/mcp/backend.js';
 import { brokenWorkflow, fixedWorkflow } from '../../scripts/mcp-demo.js';
-import { root } from '../helpers.js';
+import { root, WS } from '../helpers.js';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-unit-'));
 const wfDir = path.join(tmp, 'workflows');
 fs.cpSync(path.join(root, 'workflows'), wfDir, { recursive: true });
-const app = buildServer({ root, workflowsDir: wfDir, runsDir: path.join(tmp, 'runs'), mockDelayMs: 0 });
+const app = buildServer({ root, workflowsDir: wfDir, runsDir: path.join(tmp, 'runs'), mockDelayMs: 0, workspaceRoots: [WS] });
 const client = new Client({ name: 'test', version: '1' });
 
 async function call(name: string, args: Record<string, unknown> = {}, c = client) {
@@ -95,7 +95,7 @@ describe('MCP server tools', () => {
     const got = (await call('get_workflow', { id: 'demo2' })).json;
     expect(got.version).toBe(1);
     expect(got.edges).toContain('planner.tasks -> fix_loop.tasks');
-    const started = (await call('run_workflow', { workflow_id: 'demo2', inputs: { request: 'x', repository: 'y' }, pass_on: 1, mock_delay_ms: 0 })).json;
+    const started = (await call('run_workflow', { workflow_id: 'demo2', inputs: { request: 'x', repository: 'y' }, pass_on: 1, mock_delay_ms: 0, workspace: WS })).json;
     expect(started.run_id).toMatch(/^run_/);
     const run = await waitRun(started.run_id);
     expect(run.status).toBe('success');
@@ -111,14 +111,14 @@ describe('MCP server tools', () => {
     const bad = await call('run_workflow', { workflow: brokenWorkflow() });
     expect(bad.isError).toBe(true);
     expect(bad.json.errors.length).toBeGreaterThan(0);
-    const started = (await call('run_workflow', { workflow: fixedWorkflow(), scenario: 'fail', mock_delay_ms: 0 })).json;
+    const started = (await call('run_workflow', { workflow: fixedWorkflow(), scenario: 'fail', mock_delay_ms: 0, workspace: WS })).json;
     const run = await waitRun(started.run_id);
     expect(run.status).toBe('failed');
     expect(run.ended_at).toEqual(['end_fail']);
   });
 
   it('cancel_run stops a running run', async () => {
-    const started = (await call('run_workflow', { workflow_id: 'fix-until-tests-pass', mock_delay_ms: 200 })).json;
+    const started = (await call('run_workflow', { workflow_id: 'fix-until-tests-pass', mock_delay_ms: 200, workspace: WS })).json;
     const c = await call('cancel_run', { run_id: started.run_id });
     expect(c.json.ok).toBe(true);
     const run = await waitRun(started.run_id);
@@ -160,7 +160,7 @@ describe('MCP over Streamable HTTP (POST /mcp) and the HTTP backend proxy', () =
     const c = new Client({ name: 'proxy', version: '1' });
     await createMcpServer(httpBackend(base + '/')).connect(a);
     await c.connect(b);
-    const started = (await call('run_workflow', { workflow_id: 'fix-until-tests-pass', mock_delay_ms: 0 }, c)).json;
+    const started = (await call('run_workflow', { workflow_id: 'fix-until-tests-pass', mock_delay_ms: 0, workspace: WS }, c)).json;
     expect((await waitRun(started.run_id, c)).status).toBe('success');
     await c.close();
   });

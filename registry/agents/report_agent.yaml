@@ -8,7 +8,8 @@ prompt: |
   {{inputs.headline}}
   計畫：{{inputs.plan}}
   風險：{{inputs.risks}}
-allowed_tools: []
+allowed_tools: [Read, Glob, Grep]
+workspace: read    # 只能唯讀 workspace（Edit / Write / Bash 會被拿掉）
 inputs:
   headline: {type: string}
   plan: {type: string}

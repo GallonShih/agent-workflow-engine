@@ -31,6 +31,7 @@ export class NodeRegistry {
       source,
     };
     if (def.kind === 'agent' && !def.runtime) throw new Error(`${source}: agent node needs "runtime"`);
+    if (def.workspace !== undefined && !['none', 'read', 'write'].includes(def.workspace)) throw new Error(`${source}: workspace must be none | read | write (got ${JSON.stringify(def.workspace)})`);
     if (def.kind === 'agent') {
       def.instance_overridable ??= ['max_turns', 'timeout_seconds', 'retry'];
       def.config_schema ??= agentConfigSchema(def);

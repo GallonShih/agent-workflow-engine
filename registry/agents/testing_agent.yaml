@@ -8,6 +8,7 @@ prompt: |
   修改的檔案：{{inputs.files_modified}}
   驗收條件：{{inputs.acceptance_criteria}}
 allowed_tools: [Read, Bash]
+workspace: write   # 可讀寫 run 的 workspace（registry 層級，實例不能覆寫）
 inputs:
   files_modified: {type: array, items: {type: string}}
   acceptance_criteria: {type: array, items: {type: string}}

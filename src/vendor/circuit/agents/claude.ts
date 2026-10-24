@@ -3,6 +3,7 @@
 //   1. constructor 可注入 queryFn（測試用 fake，不需要 API key）
 //   2. result message 額外 yield { type: 'usage' }（token / cost / turns，給 Execution Monitor）
 //   3. console.log 改成 debug()，只有 CIRCUIT_DEBUG=1 才輸出
+//   4. constructor 可傳 extraOptions（tools / disallowedTools / permissionMode / cwd），最後合併進 SDK options（workspace 權限）
 const debug = (...a: unknown[]) => { if (process.env.CIRCUIT_DEBUG) console.log(...a); }; // PoC patch 3
 export type QueryFn = (params: { prompt: string; options: Record<string, unknown> }) => AsyncIterable<unknown>; // PoC patch 1
 import { BaseAgent } from './base.js';
@@ -108,8 +109,10 @@ export class ClaudeAgent extends BaseAgent {
 
   private queryFn?: QueryFn; // PoC patch 1
 
-  constructor(config: ClaudeNodeConfig, mcpConfig?: MCPAgentConfig, queryFn?: QueryFn) {
+  private extraOptions?: Record<string, unknown>; // PoC patch 4
+  constructor(config: ClaudeNodeConfig, mcpConfig?: MCPAgentConfig, queryFn?: QueryFn, extraOptions?: Record<string, unknown>) {
     super();
+    this.extraOptions = extraOptions; // PoC patch 4
     this.config = config;
     this.mcpConfig = mcpConfig;
     this.queryFn = queryFn;
@@ -217,6 +220,8 @@ export class ClaudeAgent extends BaseAgent {
         }
         debug('[ClaudeAgent] MCP servers configured:', Object.keys(this.mcpConfig.mcpServers));
       }
+
+      if (this.extraOptions) Object.assign(options, this.extraOptions); // PoC patch 4
 
       debug('[ClaudeAgent] Calling query with options:', options);
 

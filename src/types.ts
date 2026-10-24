@@ -51,6 +51,8 @@ export interface NodeDefinition {
   mcp?: string[];
   skills?: string[];
   allowed_tools?: string[];
+  /** workspace 權限：none（預設）| read | write；registry 層級，實例不可覆寫 */
+  workspace?: 'none' | 'read' | 'write';
   config?: AgentConfig;
   // ---- ports ----
   inputs: Record<string, DataPortDef>;
@@ -165,6 +167,8 @@ export interface NodeRunRecord {
   agent_events?: AgentEvent[];
   /** resume 時沿用先前 run 的結果、沒有重新執行 */
   resumed_from?: string;
+  /** agent 節點這次拿到的 workspace 權限 */
+  workspace_access?: 'none' | 'read' | 'write';
 }
 
 // Agent 事件格式直接沿用 Circuit（src/vendor/circuit/workflows/types.ts）

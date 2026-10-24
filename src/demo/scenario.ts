@@ -6,6 +6,11 @@ export interface ScenarioOptions {
   /** coding agent 在第 0 輪第 1 次嘗試會丟錯，用來展示 retry policy */
   flakyCoder?: boolean;
   delayMs?: number;
+  /**
+   * 選用：讓 mock coding agent 真的在 workspace 寫檔（只有 workspace 權限 write、而且有 Write 工具時），
+   * 用來展示 / 測試 run 的變更清單。瀏覽器沒有檔案系統，所以由 node 端注入（workspace.ts#writeWorkspaceFile）。
+   */
+  writeFile?: (workspace: string, relPath: string, content: string, mode: 'write' | 'append') => Promise<void>;
 }
 
 /**
@@ -24,9 +29,14 @@ export function demoRuntime(opts: ScenarioOptions): MockAgentRuntime {
         ],
         acceptance_criteria: ['空字串回傳 []', '既有測試全部通過'],
       }),
-      coding_agent: ({ inputs, iteration, attempt }) => {
+      coding_agent: async ({ inputs, iteration, attempt, workspaceAccess, workingDirectory, allowedTools }) => {
         if (opts.flakyCoder && iteration === 0 && attempt === 1) throw new Error('mock: transient tool error (rate limited)');
         const feedback = (inputs.feedback as string[]) ?? [];
+        if (opts.writeFile && workspaceAccess === 'write' && workingDirectory && allowedTools.includes('Write')) {
+          const i = iteration ?? 0;
+          await opts.writeFile(workingDirectory, `agent-workflow-demo/iteration-${i}.md`, `# iteration ${i}\n\n${feedback.length ? `回饋：${feedback.join('；')}` : '初版修改'}\n`, 'write');
+          await opts.writeFile(workingDirectory, 'agent-workflow-demo/CHANGELOG.md', `- iteration ${i}: mock coding agent 修改 parser\n`, 'append');
+        }
         return {
           files_modified: [`src/parser.ts@iter${iteration}`, `test/parser.test.ts@iter${iteration}`],
           summary: feedback.length ? `依回饋修正：${feedback.join('；')}` : '初版修改 parser 與測試',

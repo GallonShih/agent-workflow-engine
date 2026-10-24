@@ -9,6 +9,7 @@ prompt: |
   目標 repo：{{inputs.repository}}
   請輸出計畫、工作項目與驗收條件。
 allowed_tools: [Read, Glob, Grep]
+workspace: read    # 只能唯讀 workspace（Edit / Write / Bash 會被拿掉）
 inputs:
   request: {type: string}
   repository: {type: string}

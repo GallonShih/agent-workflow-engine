@@ -18,6 +18,7 @@ export const INSTRUCTIONS = `Agent Workflow (DSL v1) — how to author a workflo
 - loop (retry-until): config {max_iterations, until: {port, op, value}}; its body is {nodes, edges} with one loop_in (= loop inputs + iteration) and one loop_out (= loop outputs). A loop output with the same name as a loop input (e.g. "feedback") is fed into the next iteration. Extra outputs: iterations, done.
 - Agent nodes (…_agent) have fixed ports and locked permissions (model/tools/MCP cannot be overridden); per-node config may only set max_turns, timeout_seconds, retry.
 Workflow: list_node_types → get_node_type for each type you use → validate_workflow (fix every error using its "fix" hint) → save_workflow → run_workflow → poll get_run until status is success/failed.
+- Workspace: agent nodes declare workspace access in the registry (none | read | write; e.g. planning_agent = read, coding_agent / testing_agent = write). A workflow that contains read/write agents needs run_workflow "workspace": an absolute path to a local repo/dir inside the server's WORKSPACE_ROOTS. validate_workflow reports workspace_required. get_run shows the workspace, its git branch/HEAD at start, and the files changed during the run.
 Agents run on the deterministic mock runtime (no API key).`;
 
 const WORKFLOW_SCHEMA = {
@@ -81,7 +82,15 @@ export const TOOLS: Tool[] = [
   {
     name: 'validate_workflow',
     description: 'Type-check a workflow without saving it. Returns ok plus errors/warnings; every error has a code, a message, the node it concerns and a concrete "fix" suggestion (e.g. the exact edge string to add). Iterate until ok is true.',
-    inputSchema: { type: 'object', required: ['workflow'], properties: { workflow: WORKFLOW_SCHEMA, advanced: { type: 'boolean', default: false, description: 'Allow advanced features.' } } },
+    inputSchema: {
+      type: 'object',
+      required: ['workflow'],
+      properties: {
+        workflow: WORKFLOW_SCHEMA,
+        advanced: { type: 'boolean', default: false, description: 'Allow advanced features.' },
+        workspace: { type: 'string', description: 'Optional: the workspace you plan to run with. If given, the path is checked against WORKSPACE_ROOTS too.' },
+      },
+    },
   },
   {
     name: 'save_workflow',
@@ -94,7 +103,9 @@ export const TOOLS: Tool[] = [
   },
   {
     name: 'run_workflow',
-    description: 'Start a run in the background (mock agent runtime) and return its run_id immediately. Pass workflow_id of a saved workflow, or an inline workflow. inputs must match the start node outputs. Then poll get_run.',
+    description:
+      'Start a run in the background (mock agent runtime) and return its run_id immediately. Pass workflow_id of a saved workflow, or an inline workflow. inputs must match the start node outputs. ' +
+      'If the workflow has agents with workspace access read/write (planning/coding/testing/... agents), pass workspace = absolute path of the local repo/dir they should work in; it must be inside WORKSPACE_ROOTS (errors include a "fix"). Agents operate directly in that directory (no copy / worktree). Then poll get_run (it lists the changed files).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -104,12 +115,14 @@ export const TOOLS: Tool[] = [
         scenario: { type: 'string', enum: ['pass', 'fail'], default: 'pass', description: 'Demo mock agents: "pass" = tests pass on iteration pass_on; "fail" = they never pass.' },
         pass_on: { type: 'integer', minimum: 0, default: 2, description: '0-based loop iteration on which the mock testing_agent passes.' },
         mock_delay_ms: { type: 'integer', minimum: 0, maximum: 5000, description: 'Delay per mock agent call.' },
+        workspace: { type: 'string', description: 'Absolute path to the local repo/dir agents work in (must be inside the server env WORKSPACE_ROOTS; ~ allowed). Required when any agent has workspace access read or write.' },
+        mock_writes: { type: 'boolean', default: false, description: 'Mock runtime demo: the mock coding_agent writes files under <workspace>/agent-workflow-demo/ so the changed-files list has content.' },
       },
     },
   },
   {
     name: 'get_run',
-    description: 'Status of a run with a per-node summary (status, attempts, duration, error, short output preview; loop iterations appear as separate keys like fix_loop#1/coder) and the end-node outputs. status is running | success | failed | cancelled.',
+    description: 'Status of a run with a per-node summary (status, attempts, duration, error, short output preview; loop iterations appear as separate keys like fix_loop#1/coder) and the end-node outputs. status is running | success | failed | cancelled. workspace = {path, git: {branch, head, head_after}, changed_files, diff_stat} (changed files appear once the run has finished).',
     inputSchema: { type: 'object', required: ['run_id'], properties: { run_id: { type: 'string' } } },
   },
   {
@@ -244,7 +257,7 @@ export async function callTool(backend: Backend, name: string, a: Record<string,
       return text(r.json, r.status !== 200);
     }
     case 'validate_workflow': {
-      const r = await backend.request('POST', '/api/validate', { workflow: a.workflow, advanced: a.advanced === true });
+      const r = await backend.request('POST', '/api/validate', { workflow: a.workflow, advanced: a.advanced === true, ...(a.workspace !== undefined ? { workspace: a.workspace } : {}) });
       return text(r.json, r.status !== 200);
     }
     case 'save_workflow': {
@@ -255,7 +268,7 @@ export async function callTool(backend: Backend, name: string, a: Record<string,
     }
     case 'run_workflow': {
       const body: Record<string, unknown> = {};
-      for (const k of ['workflow_id', 'workflow', 'inputs', 'scenario', 'pass_on', 'mock_delay_ms']) if (a[k] !== undefined) body[k] = a[k];
+      for (const k of ['workflow_id', 'workflow', 'inputs', 'scenario', 'pass_on', 'mock_delay_ms', 'workspace', 'mock_writes']) if (a[k] !== undefined) body[k] = a[k];
       const r = await backend.request('POST', '/api/runs', body);
       return text(r.status === 202 ? { ...(r.json as object), status: 'running', next: 'poll get_run with this run_id' } : r.json, r.status !== 202);
     }
@@ -274,6 +287,7 @@ export async function callTool(backend: Backend, name: string, a: Record<string,
         duration_ms: run.meta.duration_ms,
         runtime: run.meta.runtime,
         error: run.meta.error,
+        ...(run.meta.workspace ? { workspace: run.meta.workspace } : {}),
         ended_at: ended,
         unhandled_failures: s.unhandled_failures,
         counts: s.nodes.reduce<Record<string, number>>((c, n) => ((c[n.status as string] = (c[n.status as string] ?? 0) + 1), c), {}),

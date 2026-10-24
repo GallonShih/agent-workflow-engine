@@ -10,6 +10,7 @@ prompt: |
 mcp: [github]
 skills: [code-change]
 allowed_tools: [Read, Edit, Write, Bash]
+workspace: write   # 可讀寫 run 的 workspace（registry 層級，實例不能覆寫）
 inputs:
   tasks: {type: array, items: {$type: Task}}
   feedback: {schema: {type: array, items: {type: string}}, required: false, default: []}

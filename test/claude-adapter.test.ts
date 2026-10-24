@@ -17,7 +17,7 @@ describe('Claude Agent SDK adapter (vendored Circuit ClaudeAgent, fake query)', 
     const rt = new ClaudeAgentRuntime({ queryFn });
     const def = registry().get('testing_agent')!;
     const res = await rt.run({
-      def, nodeId: 'tester', inputs: {}, prompt: 'run tests', iteration: 0, attempt: 1, scope: [], signal: new AbortController().signal, workingDirectory: '/tmp',
+      def, nodeId: 'tester', inputs: {}, prompt: 'run tests', iteration: 0, attempt: 1, scope: [], signal: new AbortController().signal, workingDirectory: '/tmp', workspaceAccess: 'write', allowedTools: ['Read', 'Bash'], disallowedTools: [],
       outputSchema: { type: 'object', properties: { passed: { type: 'boolean' } } },
     });
     expect(res.outputs).toEqual({ passed: true, failures: [], report: 'ok' });
@@ -27,12 +27,36 @@ describe('Claude Agent SDK adapter (vendored Circuit ClaudeAgent, fake query)', 
     expect(seen.allowedTools).toEqual(['Read', 'Bash']);
     expect(seen.maxTurns).toBe(8);
     expect(seen.outputFormat).toMatchObject({ type: 'json_schema' });
+    expect(seen).toMatchObject({ cwd: '/tmp', tools: ['Read', 'Bash'], permissionMode: 'acceptEdits' });
+  });
+
+  it('maps workspace access to SDK cwd / tools / disallowedTools / permissionMode', async () => {
+    const seen: Record<string, unknown>[] = [];
+    const queryFn = (params: { prompt: string; options: Record<string, unknown> }) => {
+      seen.push(params.options);
+      return (async function* () { yield { type: 'result', subtype: 'success', result: '', structured_output: { plan: 'p', tasks: [], acceptance_criteria: [] } }; })();
+    };
+    const rt = new ClaudeAgentRuntime({ queryFn });
+    const def = registry().get('coding_agent')!;
+    const base = { def, nodeId: 'n', inputs: {}, prompt: '', iteration: null, attempt: 1, scope: [], signal: new AbortController().signal, outputSchema: {} };
+    const { toolsFor } = await import('../src/workspace-policy.js');
+    const all = ['Read', 'Glob', 'Edit', 'Write', 'Bash'];
+    const mk = (access: 'none' | 'read' | 'write') => ({ ...base, workspaceAccess: access, workingDirectory: access === 'none' ? undefined : '/repo', allowedTools: toolsFor(access, all).allowed, disallowedTools: toolsFor(access, all).removed });
+    await rt.run(mk('none'));
+    await rt.run(mk('read'));
+    await rt.run(mk('write'));
+    expect(seen[0]).toMatchObject({ tools: [], permissionMode: 'dontAsk', disallowedTools: all });
+    expect(seen[0].cwd).not.toBe(process.cwd());
+    expect(String(seen[0].cwd)).toMatch(/awf-no-workspace-/);
+    expect(seen[1]).toMatchObject({ cwd: '/repo', tools: ['Read', 'Glob'], allowedTools: ['Read', 'Glob'], disallowedTools: ['Edit', 'Write', 'Bash'], permissionMode: 'dontAsk' });
+    expect(seen[2]).toMatchObject({ cwd: '/repo', tools: all, allowedTools: all, disallowedTools: [], permissionMode: 'acceptEdits' });
+    await expect(rt.run({ ...mk('write'), workingDirectory: undefined })).rejects.toThrow(/needs a workingDirectory/);
   });
 
   it('SDK error result becomes a node failure', async () => {
     const queryFn = () => (async function* () { yield { type: 'result', subtype: 'error_max_turns', errors: ['max turns'] }; })();
     const rt = new ClaudeAgentRuntime({ queryFn });
-    await expect(rt.run({ def: registry().get('testing_agent')!, nodeId: 't', inputs: {}, prompt: '', iteration: null, attempt: 1, scope: [], signal: new AbortController().signal, workingDirectory: '/tmp', outputSchema: {} })).rejects.toThrow(/max turns/);
+    await expect(rt.run({ def: registry().get('testing_agent')!, nodeId: 't', inputs: {}, prompt: '', iteration: null, attempt: 1, scope: [], signal: new AbortController().signal, workingDirectory: '/tmp', workspaceAccess: 'write', allowedTools: [], disallowedTools: [], outputSchema: {} })).rejects.toThrow(/max turns/);
   });
 });
 
